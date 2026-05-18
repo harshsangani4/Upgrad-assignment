@@ -1,0 +1,14 @@
+[project]
+name = "upgrad-course-concierge"
+version = "0.1.0"
+description = "Conversational course recommender for upGrad — scraper, FastAPI backend, React frontend."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["scraper/tests", "backend/tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.setuptools]
+packages = ["scraper", "backend", "backend.chat"]
