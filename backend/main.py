@@ -73,11 +73,19 @@ def _sse(event: str, data: dict | str) -> str:
 
 
 LENGTH_RULES = (
-    "Hard rules for this reply:\n"
-    "- 1 or 2 short sentences. Under 30 words total.\n"
+    "Style rules for this reply:\n"
+    "- 2 to 3 sentences. 28 to 50 words. Hard cap 60.\n"
     "- Start with a complete sentence. Never start with 'is', 'to', 'and'.\n"
-    "- Acknowledge what the user said in 5-8 words, then ask exactly one question.\n"
-    "- No em dashes. No bullet lists. No generic enthusiasm like 'fascinating' or 'exciting'."
+    "- BANNED stock openers (do not use any of these): 'It sounds like', 'It's great that', "
+    "'It's good to hear', 'I see that', 'I understand', 'That's awesome', 'I'm glad'. "
+    "They sound like a support script.\n"
+    "- Use varied, natural openers: 'Got it,', 'Cool,', 'Okay,', 'Right,', 'Makes sense,', "
+    "'Noted,', a quick observation, or just dive in. Do not start two consecutive replies "
+    "with the same word.\n"
+    "- Add one piece of texture (a brief reaction, a light observation, a small aside) before "
+    "the question. Keep it human, not scripted.\n"
+    "- No em dashes. No bullet lists. No generic enthusiasm ('fascinating', 'exciting', "
+    "'amazing', 'I love that')."
 )
 
 
