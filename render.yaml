@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: upgrad-concierge-backend
+    runtime: python
+    plan: free
+    region: oregon
+    branch: master
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL_CHAT
+        value: gpt-4o-mini
+      - key: OPENAI_MODEL_EXTRACT
+        value: gpt-4o-mini
+      - key: OPENAI_MODEL_RERANK
+        value: gpt-4o
+      - key: OPENAI_MODEL_EMBED
+        value: text-embedding-3-small
+      - key: ALLOWED_ORIGINS
+        sync: false

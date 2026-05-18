@@ -41,9 +41,19 @@ load_dotenv()
 
 app = FastAPI(title="upGrad Course Concierge", version="0.1.0")
 
+
+def _allowed_origins() -> list[str]:
+    raw = os.getenv("ALLOWED_ORIGINS", "").strip()
+    defaults = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    if not raw:
+        return defaults
+    extra = [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
+    return list(dict.fromkeys(defaults + extra))
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

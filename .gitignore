@@ -36,6 +36,11 @@ data/*.npy
 data/course_embeddings*
 data/raw/
 
+# Allow the small runtime artifacts the deployed backend needs
+!data/courses.sqlite
+!data/course_embeddings.npy
+!data/course_embeddings.index.json
+
 # Node / frontend
 node_modules/
 dist/
