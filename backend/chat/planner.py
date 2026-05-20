@@ -57,22 +57,34 @@ BROWSE_RE = re.compile(
 @dataclass
 class SessionState:
     session_id: str
-    messages: list[dict[str, str]] = field(default_factory=list)
     slot_values: dict[str, Any] = field(default_factory=dict)
     asked_history: list[str] = field(default_factory=list)
     attempts: Counter = field(default_factory=Counter)
-    recommended_context: list[dict[str, Any]] = field(default_factory=list)
-    # Phase 8.3 long-conversation memory
-    history_summary: str | None = None
-    empty_extract_streak: int = 0
-    # Phase 8.4 pagination / filter refinement
-    pagination_offset: int = 0
-    last_filter_override: dict[str, Any] | None = None
-    recommended_slugs: list[str] = field(default_factory=list)
-    # Phase 9.3 turn counter for fallback threshold
+    
+    # NEW state tracking
     turn_count: int = 0
-    # Phase 9.3 last_comparison for in-chat compare context
-    last_comparison: dict[str, Any] | None = None
+    empty_extract_streak: int = 0
+    
+    # Store LLM generated replies to maintain context window
+    messages: list[dict[str, str]] = field(default_factory=list)
+    
+    # Summarized older context (to keep window short)
+    history_summary: str | None = None
+    
+    # State around recommended cards for follow-up questions
+    recommended_context: list[dict] = field(default_factory=list)
+    recommended_slugs: list[str] = field(default_factory=list)
+    last_filter_override: dict | None = None
+    pagination_offset: int = 0
+    
+    last_comparison: dict | None = None
+    
+    used_templates: dict[str, list[int]] = field(default_factory=lambda: {
+        "ack_then_ask": [],
+        "recommend_transition": [],
+        "course_overview": [],
+        "confirm_recommend": [],
+    })
 
     def merge_extracted(self, updates: dict[str, Any]) -> list[str]:
         """Merge new slot values; return the list of slots that newly transitioned to filled."""

@@ -10,6 +10,7 @@ from typing import Any, Iterable
 from openpyxl import Workbook
 from sqlalchemy.orm import Session
 
+from backend.chat.heuristics import normalize_programme_type
 from backend.models import Course, CourseModule, CourseTag, get_engine, get_session_factory, init_db
 
 
@@ -58,6 +59,7 @@ def _build_course(merged: dict) -> Course:
         provider=merged.get("provider"),
         co_brand=merged.get("co_brand"),
         programme_type=merged.get("programme_type"),
+        programme_type_key=merged.get("programme_type_key") or normalize_programme_type(merged.get("programme_type")),
         category=merged.get("breadcrumb_category"),
         duration_weeks=merged.get("duration_weeks"),
         duration_label=merged.get("duration_label"),
@@ -74,6 +76,7 @@ def _build_course(merged: dict) -> Course:
         min_years_exp=merged.get("min_years_experience"),
         min_degree=merged.get("min_degree"),
         min_marks_pct=merged.get("min_marks_pct"),
+        eligibility_raw=merged.get("eligibility_raw"),
         requires_coding=_bool_to_int(merged.get("requires_coding")),
         requires_quant=_bool_to_int(merged.get("requires_quant")),
         prestige_signal=merged.get("prestige_signal"),
@@ -137,12 +140,12 @@ def upsert_course(session: Session, merged: dict) -> Course:
         existing = new
     else:
         for col in (
-            "url", "title", "provider", "co_brand", "programme_type", "category",
+            "url", "title", "provider", "co_brand", "programme_type", "programme_type_key", "category",
             "duration_weeks", "duration_label", "weekly_hours",
             "start_date", "admission_deadline",
             "emi_starts_from_inr", "fee_inr_total", "fee_usd_total", "fee_bucket",
             "format", "schedule", "level", "min_years_exp", "min_degree", "min_marks_pct",
-            "requires_coding", "requires_quant", "prestige_signal",
+            "eligibility_raw", "requires_coding", "requires_quant", "prestige_signal",
             "hero_tagline", "one_line_pitch", "raw_html_path", "last_scraped_at",
         ):
             setattr(existing, col, getattr(new, col))

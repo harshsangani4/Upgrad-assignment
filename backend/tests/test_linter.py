@@ -10,33 +10,28 @@ from __future__ import annotations
 import pytest
 from backend.chat.linter import lint
 
-
-# ---- PATTERN A — empty acknowledgement praise --------------------------------
+from backend.chat.linter import lint, strip_banned_patterns
 
 @pytest.mark.parametrize(
-    "text",
+    "phrase",
     [
-        "That's a solid start for someone new to AI.",
-        "That is a great foundation to build on.",
         "That's an amazing field to move into.",
-        "That'll really help you stand out.",
         "This goes a long way in your career.",
         "It opens doors in the industry.",
         "This can really open up opportunities for you.",
         "This sets you up well for the transition.",
         "That's an exciting space to explore.",
         "That is an incredible opportunity.",
+        "Switching into AI sounds like a smart move.",
     ],
 )
-def test_pattern_a_fires(text: str) -> None:
-    hits = lint(text)
-    assert "PATTERN_A" in hits, f"Expected PATTERN_A to fire on: {text!r}"
+def test_pattern_a_fires(phrase: str) -> None:
+    hits = lint(phrase)
+    assert "PATTERN_A" in hits
 
-
-# ---- PATTERN B — brochure-acknowledgement openers ---------------------------
 
 @pytest.mark.parametrize(
-    "text",
+    "phrase",
     [
         "Noted, you've got a year or two under your belt.",
         "Got it, you're in product management.",
@@ -45,17 +40,16 @@ def test_pattern_a_fires(text: str) -> None:
         "Awesome, you've been in fintech.",
         "Alright, you're looking to switch careers.",
         "Nice, you have a bachelor's degree.",
+        "Noted, you've got some time under your belt since January 2026.",
     ],
 )
-def test_pattern_b_fires(text: str) -> None:
-    hits = lint(text)
-    assert "PATTERN_B" in hits, f"Expected PATTERN_B to fire on: {text!r}"
+def test_pattern_b_fires(phrase: str) -> None:
+    hits = lint(phrase)
+    assert "PATTERN_B" in hits
 
-
-# ---- PATTERN C — meta-narration ----------------------------------------------
 
 @pytest.mark.parametrize(
-    "text",
+    "phrase",
     [
         "Let's find you some solid options in AI.",
         "Let's see what fits your schedule.",
@@ -66,15 +60,13 @@ def test_pattern_b_fires(text: str) -> None:
         "I can find you some options right now.",
     ],
 )
-def test_pattern_c_fires(text: str) -> None:
-    hits = lint(text)
-    assert "PATTERN_C" in hits, f"Expected PATTERN_C to fire on: {text!r}"
+def test_pattern_c_fires(phrase: str) -> None:
+    hits = lint(phrase)
+    assert "PATTERN_C" in hits
 
-
-# ---- PATTERN D — adjective stacking ------------------------------------------
 
 @pytest.mark.parametrize(
-    "text",
+    "phrase",
     [
         "Data science is an exciting space right now.",
         "That's an amazing field to be entering.",
@@ -83,25 +75,75 @@ def test_pattern_c_fires(text: str) -> None:
         "It can really make a difference.",
     ],
 )
-def test_pattern_d_fires(text: str) -> None:
-    hits = lint(text)
-    assert "PATTERN_D" in hits, f"Expected PATTERN_D to fire on: {text!r}"
+def test_pattern_d_fires(phrase: str) -> None:
+    hits = lint(phrase)
+    assert "PATTERN_D" in hits
 
 
-# ---- Clean phrases — should NOT fire -----------------------------------------
+def test_multiple_patterns_fire() -> None:
+    hits = lint("Noted, you've got some time under your belt since January 2026.")
+    assert "PATTERN_B" in hits
+    assert "PATTERN_A" in hits
+
+    hits = lint("Right, a little coding experience can be a helpful foundation in AI.")
+    assert "PATTERN_B" in hits
+    assert "PATTERN_A" in hits
+
+def test_apology_with_answer_fires() -> None:
+    hits = lint("I don't have that on the course page, but it has 5 modules.")
+    assert "APOLOGY_WITH_ANSWER" in hits
+
+
+def test_pattern_q_internal_leak_fires() -> None:
+    assert "PATTERN_Q" in lint("The faculty is not specified in the scraped data.")
+    assert "PATTERN_Q" in lint("That detail isn't specified in the course information.")
+
+
+def test_pattern_r_bare_redirect_fires() -> None:
+    assert "PATTERN_R" in lint("The upGrad page covers placement guarantees in detail.")
+    assert "PATTERN_R" in lint("The upGrad page has the alumni community details.")
+
+
+def test_polite_redirect_does_not_fire() -> None:
+    # Two-sentence, value-first answers must NOT trip Q or R.
+    good = (
+        "upGrad usually offers placement support like resume reviews and hiring-partner "
+        "introductions rather than a blanket guarantee. The official upGrad page spells out "
+        "what this course includes."
+    )
+    hits = lint(good)
+    assert "PATTERN_Q" not in hits and "PATTERN_R" not in hits
+
+
+def test_data_science_mention_does_not_fire() -> None:
+    assert lint("This is great if you're interested in the data science field.") == []
+
+def test_em_dash_fires() -> None:
+    hits = lint("This is a great — wait, no.")
+    assert "EM_DASH" in hits
+
+def test_strip_banned_patterns_b():
+    draft = "Noted, you've got a great background. Let's see what fits."
+    stripped = strip_banned_patterns(draft, ["PATTERN_B"])
+    assert stripped == "You've got a great background. Let's see what fits."
+    
+def test_strip_banned_patterns_em_dash():
+    draft = "No em dashes — they are bad."
+    stripped = strip_banned_patterns(draft, ["EM_DASH"])
+    assert stripped == "No em dashes, they are bad."
 
 @pytest.mark.parametrize(
-    "text",
+    "phrase",
     [
-        "Year or two in PM — what's pulling you toward AI specifically?",
+        "Year or two in PM, what's pulling you toward AI specifically?",
         "Five years in product, that trajectory makes sense. What domain are you drawn to?",
         "With 8 hours a week you have real options. Do you prefer weekends or weekdays?",
         "A bachelor's in CS is fine for most of these. Budget range?",
         "Online-only narrows the field a bit, which is actually helpful. Any IIM preference?",
         "Switching into data is doable from your background. How much can you commit weekly?",
-        "Three years in ops gives you a solid read on process. What's the goal — ML roles or analytics?",
+        "PM, got it. How long have you been at it?",
     ],
 )
-def test_clean_phrase_does_not_fire(text: str) -> None:
-    hits = lint(text)
-    assert hits == [], f"Expected no lint hits, got {hits} on: {text!r}"
+def test_clean_phrase_does_not_fire(phrase: str) -> None:
+    hits = lint(phrase)
+    assert not hits

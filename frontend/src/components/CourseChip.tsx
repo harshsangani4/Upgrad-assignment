@@ -33,12 +33,12 @@ export default function CourseChip({ course, onDismiss, messageCount }: Props) {
             className="w-5 h-5 rounded-full object-contain shrink-0"
           />
         ) : (
-          <span className="w-5 h-5 rounded-full bg-primary/10 text-primary text-[9px] font-bold flex items-center justify-center shrink-0">
+          <span className="w-5 h-5 rounded-full bg-pill text-primary text-[10px] font-semibold flex items-center justify-center shrink-0">
             {initials(course.provider)}
           </span>
         )}
 
-        <span className="text-[12px] text-ink font-medium flex-1 truncate min-w-0">
+        <span className="text-xs text-ink font-medium flex-1 truncate min-w-0">
           Re:{" "}
           <span className="font-semibold">{course.title}</span>
           {course.provider && (
@@ -49,15 +49,15 @@ export default function CourseChip({ course, onDismiss, messageCount }: Props) {
         <button
           type="button"
           onClick={onDismiss}
-          aria-label="Dismiss course"
-          className="shrink-0 text-ink-soft hover:text-primary transition-colors p-0.5 rounded"
+          aria-label="Dismiss attached course"
+          className="shrink-0 text-ink-soft hover:text-primary transition-colors p-1 rounded focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
         >
-          <X size={13} />
+          <X size={14} />
         </button>
       </div>
 
       {messageCount !== undefined && messageCount > 0 && (
-        <p className="text-[11px] text-ink-soft px-3">
+        <p className="text-xs text-ink-muted px-3">
           Still on this course — dismiss to go back.
           {messageCount >= 2 && " (auto-clears after 3 messages)"}
         </p>

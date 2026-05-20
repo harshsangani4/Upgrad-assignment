@@ -1,33 +1,60 @@
-import { GitCompareArrows, Loader2 } from "lucide-react";
+import { ArrowRight, Loader2, X } from "lucide-react";
 
 type Props = {
   count: number;
   onCompare: () => void;
+  onClear: () => void;
   loading?: boolean;
 };
 
-export default function CompareBar({ count, onCompare, loading }: Props) {
+const MAX = 3;
+
+export default function CompareBar({ count, onCompare, onClear, loading }: Props) {
+  const canCompare = count >= 2 && count <= MAX;
+  const tooltip = count < 2 ? "Pick at least 2 to compare" : count > MAX ? "Max 3 to compare" : undefined;
+
   return (
-    <div className="sticky bottom-0 left-0 right-0 z-10 border-t border-border bg-white/90 backdrop-blur px-4 py-2.5 flex items-center justify-between gap-3 shadow-[0_-2px_8px_rgba(0,0,0,0.06)]">
-      <span className="text-[13px] text-ink-soft">
-        <span className="font-semibold text-ink">{count}</span>{" "}
-        course{count !== 1 ? "s" : ""} selected
-      </span>
+    <div
+      role="region"
+      aria-label="Comparison selection"
+      className={
+        "sticky bottom-0 left-0 right-0 z-10 bg-white border-t border-border px-4 py-3 " +
+        "flex items-center justify-between gap-3 shadow-bar transition-transform duration-200 " +
+        (count === 0 ? "translate-y-full" : "translate-y-0")
+      }
+    >
+      <div className="flex items-center gap-3">
+        <span className="text-sm text-ink font-medium">{count} of {MAX} selected</span>
+        <button
+          type="button"
+          onClick={onClear}
+          aria-label="Clear comparison selection"
+          className="flex items-center gap-1 text-sm text-ink-soft hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 rounded"
+        >
+          <X size={14} /> Clear
+        </button>
+      </div>
       <button
         type="button"
         onClick={onCompare}
-        disabled={loading}
-        className="btn-primary text-[12px] px-4 py-1.5 gap-1.5"
+        disabled={!canCompare || loading}
+        title={tooltip}
+        aria-label="Compare selected courses"
+        className={
+          "flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors " +
+          "focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 " +
+          (canCompare
+            ? "bg-primary text-white hover:bg-primary-dark"
+            : "bg-pill text-primary/50 cursor-not-allowed")
+        }
       >
         {loading ? (
           <>
-            <Loader2 size={13} className="animate-spin" />
-            Comparing…
+            <Loader2 size={16} className="animate-spin" /> Comparing
           </>
         ) : (
           <>
-            <GitCompareArrows size={13} />
-            Compare →
+            Compare <ArrowRight size={16} />
           </>
         )}
       </button>

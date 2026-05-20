@@ -13,6 +13,7 @@ type Props = {
   selectedSlugs: string[];
   onToggleCompare: (slug: string) => void;
   onCompare: () => void;
+  onClearCompare: () => void;
   comparingLoading?: boolean;
   onAskAbout: (course: AttachedCourse) => void;
 };
@@ -28,47 +29,28 @@ export default function PicksRail({
   selectedSlugs,
   onToggleCompare,
   onCompare,
+  onClearCompare,
   comparingLoading,
   onAskAbout,
 }: Props) {
   const scrollContainerRef = useRef<HTMLElement | null>(null);
   const lastUserScrollAt = useRef<number>(0);
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
-  const glowTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
-  // Track manual scroll
   const handleScroll = () => {
     lastUserScrollAt.current = Date.now();
   };
 
-  // Auto-scroll to first new card when items change
+  // Auto-scroll to the first newly-added card (no glow; selection uses ring now).
   useEffect(() => {
     const now = Date.now();
-    // Don't fight the user if they scrolled in the last second
     if (now - lastUserScrollAt.current < 1000) return;
-
-    // Find first "new" card (addedAt within last 2s)
     const newCard = items.find(
       (r) => r.addedAt !== undefined && now - (r.addedAt as number) < NEW_CARD_TTL_MS
     );
     if (!newCard) return;
-
     const node = cardRefs.current.get(newCard.course_slug);
     if (!node) return;
-
-    // Apply glow
-    node.setAttribute("data-new", "true");
-    const existing = glowTimers.current.get(newCard.course_slug);
-    if (existing) clearTimeout(existing);
-    glowTimers.current.set(
-      newCard.course_slug,
-      setTimeout(() => {
-        node.removeAttribute("data-new");
-        glowTimers.current.delete(newCard.course_slug);
-      }, NEW_CARD_TTL_MS)
-    );
-
-    // Scroll with a small header offset
     setTimeout(() => {
       node.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 50);
@@ -84,18 +66,18 @@ export default function PicksRail({
         <Sparkles size={16} className="text-primary" />
         <h2 className="text-sm font-semibold text-ink">Your picks</h2>
         {items.length > 0 && (
-          <span className="text-[12px] text-ink-soft">({items.length})</span>
+          <span className="text-xs text-ink-soft">({items.length})</span>
         )}
       </div>
 
       {items.length === 0 ? (
         <div className="flex-1 flex items-center justify-center text-center">
-          <p className="text-[13px] text-ink-soft leading-relaxed max-w-[220px]">
+          <p className="text-sm text-ink-soft leading-relaxed max-w-[220px]">
             Your matches will show up here once I know a little about you.
           </p>
         </div>
       ) : (
-        <div className="space-y-3 pb-14">
+        <div className="space-y-3 pb-24">
           {items.map((rec) => (
             <div
               key={rec.course_slug}
@@ -122,7 +104,7 @@ export default function PicksRail({
               type="button"
               onClick={onSeeMore}
               disabled={loadingMore}
-              className="btn-ghost w-full border border-border rounded-xl py-2.5"
+              className="btn-ghost w-full border border-border rounded-md py-3"
             >
               {loadingMore ? (
                 <>
@@ -136,11 +118,12 @@ export default function PicksRail({
         </div>
       )}
 
-      {/* CompareBar — sticky at bottom when ≥2 selected */}
-      {selectedSlugs.length >= 2 && (
+      {/* CompareBar — visible at >=1 selected so the affordance is learnable. */}
+      {selectedSlugs.length >= 1 && (
         <CompareBar
           count={selectedSlugs.length}
           onCompare={onCompare}
+          onClear={onClearCompare}
           loading={comparingLoading}
         />
       )}

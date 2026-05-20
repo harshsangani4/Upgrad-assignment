@@ -104,14 +104,16 @@ LENGTH_RULES = (
     "Style rules for this reply:\n"
     "- 2 to 3 sentences. 28 to 50 words. Hard cap 60.\n"
     "- Start with a complete sentence. Never start with 'is', 'to', 'and'.\n"
-    "- BANNED stock openers (do not use any of these): 'It sounds like', 'It's great that', "
-    "'It's good to hear', 'I see that', 'I understand', 'That's awesome', 'I'm glad'. "
-    "They sound like a support script.\n"
-    "- Use varied, natural openers: 'Got it,', 'Cool,', 'Okay,', 'Right,', 'Makes sense,', "
-    "'Noted,', a quick observation, or just dive in. Do not start two consecutive replies "
-    "with the same word.\n"
-    "- Add one piece of texture (a brief reaction, a light observation, a small aside) before "
-    "the question. Keep it human, not scripted.\n"
+    "- React to the SPECIFIC thing they just told you (their actual answer), not their overall "
+    "goal. Build the next question off that detail.\n"
+    "- Do NOT validate or comment on their goal every turn. Ban empty praise: 'big leap', "
+    "'rewarding', 'solid foundation', 'great choice', 'exciting journey', 'good move'. Skip it "
+    "and engage with substance.\n"
+    "- Vary the SHAPE of each reply from your previous one. If your last message opened with a "
+    "reaction, open this one with the question directly. Never reuse the same opener two turns "
+    "in a row. Do not begin with the same word twice running.\n"
+    "- BANNED stock openers: 'It sounds like', 'It's great that', 'It's good to hear', 'I see "
+    "that', 'I understand', 'That's awesome', 'I'm glad'.\n"
     "- No em dashes. No bullet lists. No generic enthusiasm ('fascinating', 'exciting', "
     "'amazing', 'I love that')."
 )
@@ -119,11 +121,30 @@ LENGTH_RULES = (
 
 def _directive_text(hint: str | None, phrasing: str | None, state) -> str:
     """Build the per-turn system directive (length rules + what to do this turn)."""
+    import random
+    from backend.chat.persona import (
+        ACK_THEN_ASK_TEMPLATES,
+        RECOMMEND_TRANSITION_TEMPLATES,
+        CONFIRM_RECOMMEND_TEMPLATES,
+    )
+    
+    def _pick_template(kind: str, templates: list[str]) -> str:
+        used = state.used_templates[kind]
+        available = [i for i in range(len(templates)) if i not in used]
+        if not available:
+            used.clear()
+            available = list(range(len(templates)))
+        idx = random.choice(available)
+        used.append(idx)
+        return templates[idx]
+
     base = LENGTH_RULES + "\n\n"
     if hint == READY:
+        template = _pick_template("recommend_transition", RECOMMEND_TRANSITION_TEMPLATES)
         return base + (
-            "The planner says READY_TO_RECOMMEND. Reply with one warm transition line under "
-            "12 words, then stop. Example: \"Okay, three picks coming up.\" Do not list features."
+            "The planner says READY_TO_RECOMMEND. "
+            f"Use this response shape: {template} "
+            "Do not list features."
         )
     if hint == BROWSE_ALL:
         return base + (
@@ -138,11 +159,12 @@ def _directive_text(hint: str | None, phrasing: str | None, state) -> str:
             f"gently circle back to what we still need. Suggested phrasing: \"{ph}\"."
         )
     if hint == CONFIRM_RECOMMEND:
+        template = _pick_template("confirm_recommend", CONFIRM_RECOMMEND_TEMPLATES)
         return base + (
             "The planner says CONFIRM_RECOMMEND: user asked to see courses but we have fewer than "
-            "5 hard slots filled. Say you're happy to recommend now, but sharper picks come with "
-            "a couple more details. Keep it under 20 words. Offer two options: keep going or see now. "
-            "Example: \"Happy to, I'll have sharper picks with a couple more details — but I can take "
+            "5 hard slots filled. "
+            f"Use this response shape: {template} "
+            "Keep it under 20 words. Example: \"Happy to, I'll have sharper picks with a couple more details — but I can take "
             "a swing now. Which?\""
         )
     if hint == MORE_CARDS:
@@ -173,9 +195,16 @@ def _directive_text(hint: str | None, phrasing: str | None, state) -> str:
         )
     if hint:
         ph = phrasing or hint.replace("_", " ")
+        template = _pick_template("ack_then_ask", ACK_THEN_ASK_TEMPLATES)
+        
+        # Get last 3 assistant openers
+        assistant_msgs = [m["content"] for m in state.messages if m["role"] == "assistant"]
+        openers = [" ".join(m.split()[:5]) for m in assistant_msgs[-3:]]
+        mimic_rule = f"\nDo NOT mimic these previous openers from this session: {', '.join(openers)}" if openers else ""
+        
         return base + (
             f"Probe the slot '{hint}' next. Suggested phrasing: \"{ph}\". "
-            "Acknowledge their last reply briefly, then ask exactly that question."
+            f"Use this response shape: {template}{mimic_rule}"
         )
     return base
 
@@ -219,21 +248,15 @@ def _strip_dashes(text: str) -> str:
     return text
 
 
-def _stream_assistant(messages: list[dict], client: OpenAI) -> Iterator[str]:
+def _generate_assistant(messages: list[dict], client: OpenAI) -> str:
     model = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
-    stream = client.chat.completions.create(
+    resp = client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=0.6,
-        stream=True,
+        temperature=0.75,
     )
-    for chunk in stream:
-        try:
-            delta = chunk.choices[0].delta.content
-        except (AttributeError, IndexError):
-            delta = None
-        if delta:
-            yield _strip_dashes(delta)
+    content = resp.choices[0].message.content or ""
+    return _strip_dashes(content)
 
 
 # ---------- endpoints ------------------------------------------------------------
@@ -442,48 +465,45 @@ def chat(req: ChatRequest):
         if confirm_chips:
             yield _sse("quick_replies", {"slot": "confirm_recommend", "options": confirm_chips}).encode("utf-8")
 
-        # --- Stream-optimistic lint: stream live, lint after, retry if dirty ---
-        assistant_buf: list[str] = []
+        # --- Single-emission generation + lint ---
         try:
-            for token in _stream_assistant(messages_for_llm, client):
-                assistant_buf.append(token)
-                yield _sse("token", {"value": token}).encode("utf-8")
+            full_text = _generate_assistant(messages_for_llm, client)
         except Exception as e:
             yield _sse("error", {"message": str(e)}).encode("utf-8")
             return
 
-        full_text = "".join(assistant_buf).strip()
-
-        # Lint the streamed response
         hits = voice_lint(full_text) if full_text else []
         if hits:
             import logging
             logging.getLogger(__name__).warning("Voice lint hit on first pass: %s", hits)
-            # Regenerate once non-streaming with explicit rewrite instruction
             rewrite_directive = (
                 f"Your previous draft contained banned patterns: {', '.join(hits)}. "
                 "Rewrite the response now without those patterns. "
                 + directive
             )
             rewrite_msgs = _build_chat_messages(state, rewrite_directive, recent_window, is_first_turn)
-            retry_buf: list[str] = []
             try:
-                for token in _stream_assistant(rewrite_msgs, client):
-                    retry_buf.append(token)
-                    yield _sse("token", {"value": token}).encode("utf-8")
-                retry_text = "".join(retry_buf).strip()
+                retry_text = _generate_assistant(rewrite_msgs, client)
                 hits2 = voice_lint(retry_text) if retry_text else []
                 if hits2:
                     logging.getLogger(__name__).warning(
                         "Voice lint still hitting after retry: %s", hits2
                     )
+                    from backend.chat.linter import strip_banned_patterns
+                    retry_text = strip_banned_patterns(retry_text, hits2)
                 if retry_text:
                     full_text = retry_text
             except Exception:
                 pass  # ship what we have
 
         if full_text:
+            # Stream the final approved text in chunks to simulate typing
+            chunk_size = 4
+            for i in range(0, len(full_text), chunk_size):
+                yield _sse("token", {"value": full_text[i:i+chunk_size]}).encode("utf-8")
+            
             state.messages.append({"role": "assistant", "content": full_text})
+        
         if turn["quick_slot"]:
             record_question(state, turn["quick_slot"])
 
@@ -592,15 +612,29 @@ def course_ask(slug: str, req: CourseAskRequest, db: Session = Depends(db_sessio
 
     client = _openai()
 
+    # Guard: never let internal-mechanics leaks ("scraped data") or curt redirects
+    # reach the user. Course-QA answers are short, so we buffer, lint, and regen once.
+    correction = (
+        " Do not mention data, sources, or that anything is unavailable. Speak as an "
+        "upGrad insider. If a detail is unknown, describe how upGrad programmes of this "
+        "type usually work, then point to the official page warmly. At least two sentences."
+    )
+
+    def _generate(extra: str = "") -> str:
+        return "".join(
+            stream_course_answer(course, req.message, PERSONA_TURN_REMINDER + extra, client=client)
+        )
+
     def event_stream() -> Iterator[bytes]:
-        buf: list[str] = []
         try:
-            for token in stream_course_answer(course, req.message, PERSONA_TURN_REMINDER, client=client):
-                buf.append(token)
-                yield _sse("token", {"value": token}).encode("utf-8")
+            answer = _generate()
+            if voice_lint(answer):
+                answer = _generate(correction)
         except Exception as e:
             yield _sse("error", {"message": str(e)}).encode("utf-8")
             return
+        # Emit the vetted answer (single token event; frontend appends it as-is).
+        yield _sse("token", {"value": answer}).encode("utf-8")
         yield _sse("done", {"ok": True}).encode("utf-8")
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

@@ -1,4 +1,13 @@
-import { ArrowRight, AlertTriangle, Check, MessageCircle, GripVertical, GitCompareArrows } from "lucide-react";
+import { useState } from "react";
+import {
+  ArrowRight,
+  AlertTriangle,
+  Check,
+  GripVertical,
+  MessageCircle,
+  Bookmark,
+  BookmarkCheck,
+} from "lucide-react";
 import type { Recommendation } from "../lib/api";
 import type { AttachedCourse } from "./CourseChip";
 
@@ -18,6 +27,7 @@ function initials(provider: string | null): string {
 }
 
 export default function CourseCard({ rec, onAskAbout, selected, onToggleCompare, compareDisabled }: Props) {
+  const [saved, setSaved] = useState(false);
   const chips = [rec.duration_label, rec.format, rec.level, rec.fee_bucket].filter(Boolean) as string[];
   const reasons = rec.fit_reasons && rec.fit_reasons.length > 0 ? rec.fit_reasons : [rec.why_this_fits];
 
@@ -27,83 +37,98 @@ export default function CourseCard({ rec, onAskAbout, selected, onToggleCompare,
     provider: rec.provider,
   };
 
-  const handleDragStart = (e: React.DragEvent<HTMLDivElement>) => {
-    e.dataTransfer.setData(
-      "application/upgrad-course",
-      JSON.stringify(attachedCourse)
-    );
+  const handleDragStart = (e: React.DragEvent<HTMLButtonElement>) => {
+    e.dataTransfer.setData("application/upgrad-course", JSON.stringify(attachedCourse));
     e.dataTransfer.effectAllowed = "copy";
   };
 
-  const handleAskAbout = () => {
-    onAskAbout(attachedCourse);
-  };
+  const cardClass = [
+    "flex flex-col rounded-lg border bg-white p-6 transition-all",
+    selected
+      ? "ring-2 ring-primary border-primary"
+      : "border-border shadow-md hover:shadow-xl hover:-translate-y-1",
+  ].join(" ");
 
   return (
-    <div
-      draggable
-      onDragStart={handleDragStart}
-      className="group relative flex flex-col rounded-2xl border border-border bg-white p-5 shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-200 slide-up cursor-grab active:cursor-grabbing"
-    >
-      {/* Drag handle */}
-      <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-40 transition-opacity text-ink-soft">
-        <GripVertical size={16} />
-      </div>
+    <div className={`${cardClass} slide-up`}>
+      {/* Header row */}
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          draggable
+          onDragStart={handleDragStart}
+          aria-label="Drag this course into the chat to ask about it"
+          title="Drag into chat to ask about this course"
+          className="hidden md:flex w-7 h-7 items-center justify-center rounded-md border border-border-strong bg-white text-ink-soft cursor-grab active:cursor-grabbing hover:bg-pill hover:border-primary hover:text-primary focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-colors shrink-0"
+        >
+          <GripVertical size={16} strokeWidth={2.25} />
+        </button>
 
-      <div className="flex items-center gap-3 mb-3">
-        <div className="flex items-center justify-center w-11 h-11 rounded-full border border-border bg-surface text-primary-dark font-semibold text-sm shrink-0">
+        <div className="flex items-center justify-center w-10 h-10 rounded-full border border-border bg-surface text-primary-dark font-semibold text-sm shrink-0">
           {initials(rec.provider)}
         </div>
-        <div className="min-w-0">
-          <div className="text-[12px] text-ink-soft truncate">{rec.provider || "upGrad"}</div>
-          {rec.programme_type && (
-            <div className="text-[11px] uppercase tracking-wider text-ink-soft truncate">
-              {rec.programme_type}
-            </div>
-          )}
+
+        <div className="min-w-0 flex-1 text-sm text-ink-soft truncate">
+          {rec.provider || "upGrad"}
+          {rec.programme_type ? ` · ${rec.programme_type}` : ""}
         </div>
+
+        <label className="flex items-center gap-2 cursor-pointer select-none shrink-0">
+          <input
+            type="checkbox"
+            className="w-4 h-4 rounded border-2 border-border accent-primary focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
+            checked={!!selected}
+            disabled={compareDisabled}
+            onChange={onToggleCompare}
+            aria-label="Select for comparison"
+          />
+          <span className="text-sm text-ink-soft">Compare</span>
+        </label>
       </div>
 
-      <h3 className="text-[17px] font-semibold text-ink leading-snug mb-3 line-clamp-2">
+      {/* Title */}
+      <h3 className="mt-4 text-lg font-semibold text-ink leading-snug line-clamp-2">
         {rec.title}
       </h3>
 
+      {/* Chips */}
       {chips.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mb-4">
+        <div className="mt-3 flex flex-wrap gap-2">
           {chips.map((c) => (
-            <span key={c} className="chip">
-              {c}
-            </span>
+            <span key={c} className="chip">{c}</span>
           ))}
         </div>
       )}
 
-      <div className="text-[12px] font-semibold text-ink mb-2">Why this fits you</div>
-      <ul className="space-y-1.5 mb-3">
+      {/* Why this fits */}
+      <div className="mt-6 text-sm font-semibold text-ink">Why this fits you</div>
+      <ul className="mt-2 space-y-1.5">
         {reasons.map((r, i) => (
-          <li key={i} className="flex gap-2 text-[13px] text-ink-soft leading-snug">
+          <li key={i} className="flex gap-2 text-sm text-ink-soft leading-snug">
             <Check size={15} className="text-success shrink-0 mt-0.5" />
             <span>{r}</span>
           </li>
         ))}
       </ul>
 
+      {/* Watch out */}
       {rec.watch_outs && (
-        <div className="flex gap-2 text-[12px] text-ink-soft leading-snug mb-3 bg-surface rounded-md px-3 py-2">
-          <AlertTriangle size={14} className="text-primary shrink-0 mt-0.5" />
+        <div className="mt-3 flex gap-2 text-sm text-ink-soft leading-snug bg-surface rounded-md px-3 py-2">
+          <AlertTriangle size={15} className="text-warning shrink-0 mt-0.5" />
           <span>{rec.watch_outs}</span>
         </div>
       )}
 
+      {/* Faculty */}
       {rec.faculty && rec.faculty.length > 0 && (
-        <div className="text-[12px] text-ink-soft mb-4 leading-snug">
+        <div className="mt-3 text-sm text-ink-soft leading-snug">
           <span className="font-medium text-ink">Faculty:</span>{" "}
           {rec.faculty.slice(0, 3).map((f) => f.name).join(", ")}
         </div>
       )}
 
       {/* Actions row */}
-      <div className="mt-auto flex gap-2">
+      <div className="mt-6 flex flex-col sm:flex-row gap-2">
         <a
           href={rec.course_url}
           target="_blank"
@@ -112,29 +137,22 @@ export default function CourseCard({ rec, onAskAbout, selected, onToggleCompare,
         >
           View course <ArrowRight size={16} />
         </a>
-
         <button
           type="button"
-          onClick={handleAskAbout}
-          title="Ask about this course"
-          className="btn-ghost border border-border rounded-md px-2.5 py-2 shrink-0"
+          onClick={() => setSaved((s) => !s)}
+          aria-label={saved ? "Remove from saved" : "Save course"}
+          className="btn-ghost border border-border"
         >
-          <MessageCircle size={15} />
+          {saved ? <BookmarkCheck size={15} className="text-primary" /> : <Bookmark size={15} />}
+          {saved ? "Saved" : "Save"}
         </button>
-
         <button
           type="button"
-          onClick={onToggleCompare}
-          disabled={compareDisabled}
-          title={compareDisabled ? "Max 3 to compare" : selected ? "Remove from compare" : "Add to compare"}
-          className={
-            "border rounded-md px-2.5 py-2 shrink-0 text-[11px] font-medium transition-colors " +
-            (selected
-              ? "bg-primary text-white border-primary"
-              : "btn-ghost border-border " + (compareDisabled ? "opacity-40 cursor-not-allowed" : ""))
-          }
+          onClick={() => onAskAbout(attachedCourse)}
+          aria-label="Ask about this course"
+          className="btn-ghost border border-border"
         >
-          <GitCompareArrows size={15} />
+          <MessageCircle size={15} /> Ask
         </button>
       </div>
     </div>

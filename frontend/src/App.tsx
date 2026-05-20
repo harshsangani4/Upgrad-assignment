@@ -23,7 +23,13 @@ const COURSE_MSG_AUTO_CLEAR = 3;
 const HOOK_MESSAGE =
   "Hey, I'm here to help you figure out which upGrad course is actually right for you, not just the shiny one. Think of me as the friend who's done the homework. So, what's pulling you here? A specific goal, or just browsing?";
 
-const STARTERS = ["I want to switch into AI", "I'm exploring an MBA", "Help me upskill in data"];
+const STARTERS = [
+  "I want to switch into AI",
+  "I'm exploring an MBA",
+  "Help me upskill in data",
+  "Aiming for a promotion",
+  "Just browsing for now",
+];
 
 function initialMessages(): ChatMessage[] {
   return [{ role: "assistant", content: HOOK_MESSAGE }];
@@ -212,6 +218,8 @@ export default function App() {
     });
   };
 
+  const handleClearCompare = () => setSelectedSlugs([]);
+
   const handleCompare = async () => {
     if (!sessionId || selectedSlugs.length < 2 || comparingLoading) return;
     setComparingLoading(true);
@@ -280,6 +288,7 @@ export default function App() {
             selectedSlugs={selectedSlugs}
             onToggleCompare={handleToggleCompare}
             onCompare={handleCompare}
+            onClearCompare={handleClearCompare}
             comparingLoading={comparingLoading}
             onAskAbout={handleAskAbout}
           />

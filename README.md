@@ -44,6 +44,22 @@ cold instance can take 30 to 60 seconds. To keep it warm:
 `/healthz` is a no-op liveness probe (no DB or OpenAI calls), so the ping is cheap.
 Alternative: cron-job.org with the same URL on a 10-minute interval.
 
+### What's new in v0.6
+
+- Compare select moved to the top-right of every course card.
+- Drag handle now has a visible border (always-on affordance, not hover-only).
+- New "Clear" button on the comparison bar; the bar now appears at the first selection.
+- Full design-token sweep: zero hex/rgba literals outside `theme.ts`, spacing locked to the scale.
+- `npm run lint:style` enforces the above; focus rings + reduced-motion across the UI.
+
+### What's new in v0.5
+
+- Course-QA never punts on a top-tier question (eligibility, duration, format, fees, who-it's-for, curriculum, faculty, certificate).
+- Per-template scraper fallbacks: upGrad Campus and Bootcamp eligibility is now parsed from FAQ / admission sections, not just the university-partner layout.
+- Programme-type heuristics fill the gap when specific data is missing, always with a "typically" caveat and a pointer to the official page.
+- A question-to-field router surfaces the most relevant fields per question for sharper prompt context.
+- `python -m scraper.audit` writes a per-field coverage report (`data/coverage_report.csv`).
+
 ### What's new in v0.2
 
 - Keepalive-friendly `/healthz` + UptimeRobot guidance.

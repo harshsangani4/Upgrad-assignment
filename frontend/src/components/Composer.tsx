@@ -80,7 +80,7 @@ export default function Composer({
       onDrop={handleDrop}
     >
       {isDragOver && (
-        <div className="text-[12px] text-primary font-medium text-center mb-2 fade-in">
+        <div className="text-xs text-primary font-medium text-center mb-2 fade-in">
           Drop course here to ask about it
         </div>
       )}
@@ -108,21 +108,22 @@ export default function Composer({
                 : "say something..."
             }
             disabled={disabled}
-            className="flex-1 resize-none rounded-xl border border-border bg-white px-4 py-2.5 text-[15px] text-ink placeholder:text-ink-soft focus:outline-none focus:border-primary focus:ring-2 focus:ring-pill disabled:opacity-50 max-h-32 transition-colors"
+            className="flex-1 resize-none rounded-md border border-border bg-white px-4 py-3 text-[15px] text-ink placeholder:text-ink-muted focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:opacity-50 max-h-32 transition-colors"
           />
           <button
             type="button"
             onClick={submit}
             disabled={disabled || !value.trim()}
-            className="btn-primary px-5"
+            className="btn-primary px-6"
+            aria-label="Send message"
           >
             Send
           </button>
         </div>
       </div>
 
-      <div className="max-w-3xl mx-auto mt-1.5 text-[11px] text-ink-soft px-1">
-        Enter to send, Shift+Enter for newline
+      <div className="max-w-3xl mx-auto mt-2 text-xs text-ink-muted px-1">
+        Enter to send · Shift+Enter for newline
       </div>
     </div>
   );

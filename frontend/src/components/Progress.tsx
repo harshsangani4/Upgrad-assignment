@@ -11,23 +11,23 @@ export default function Progress({ filled, total }: Props) {
   const done = filled >= total;
   return (
     <div
-      className="border-b border-border bg-white/70 backdrop-blur px-5 py-2.5"
+      className="border-b border-border bg-white px-6 py-2"
       title={`I need a few essentials to recommend well. We're ${filled} of ${total} in.`}
     >
-      <div className="max-w-[1280px] mx-auto flex items-center gap-3">
+      <div className="max-w-[1280px] mx-auto">
         {done ? (
-          <>
+          <div className="flex items-center gap-2">
             <CheckCircle2 size={14} className="text-success shrink-0" />
-            <span className="text-[12px] font-medium text-success whitespace-nowrap">
+            <span className="text-xs font-medium text-success whitespace-nowrap">
               Ready to recommend
             </span>
-          </>
+          </div>
         ) : (
           <>
-            <span className="text-[12px] font-medium text-ink-soft whitespace-nowrap">
+            <div className="text-xs font-medium text-ink-soft mb-1">
               {filled} of {total} essentials
-            </span>
-            <div className="flex-1 h-1.5 rounded-full bg-surface overflow-hidden border border-border/40">
+            </div>
+            <div className="h-1 rounded-full bg-surface-alt overflow-hidden">
               <div
                 className="h-full rounded-full bg-primary"
                 style={{ width: `${pct}%`, transition: "width 400ms ease" }}

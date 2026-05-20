@@ -325,21 +325,97 @@ def _extract_testimonials(soup: BeautifulSoup) -> list[dict[str, str | None]]:
     return out
 
 
-def _extract_eligibility(soup: BeautifulSoup) -> tuple[str | None, int | None, str | None]:
-    section = _section_by_heading(soup, "Eligibility")
+_ELIGIBILITY_FAQ_RE = re.compile(
+    r"(eligib|who (?:can|should) (?:apply|enroll|enrol|join|take|do)|prior experience|"
+    r"do i need|prerequisite|qualif|requirement|background|\bdegree\b|"
+    r"experience (?:required|needed)|who is this (?:program|course|for))",
+    re.IGNORECASE,
+)
+
+
+def _eligibility_from_faqs(faqs: list[dict] | None) -> str | None:
+    """Template 2: pull eligibility out of an FAQ question (upGrad Campus / Bootcamp)."""
+    for faq in faqs or []:
+        q = (faq.get("question") or "").strip()
+        a = (faq.get("answer") or "").strip()
+        if q and _ELIGIBILITY_FAQ_RE.search(q):
+            return f"{q} {a}".strip()
+    return None
+
+
+def _eligibility_from_summary_card(soup: BeautifulSoup) -> str | None:
+    """Template 4: a single eligibility row in a summary card (rare certs)."""
+    for row in soup.select(".summary-card .row, [data-anchor='summary'] li, .summary-card li"):
+        label = row.find(["span", "strong"])
+        if label and re.search(r"eligib|qualif|requirement", label.get_text(" ", strip=True), re.IGNORECASE):
+            txt = row.get_text(" ", strip=True)
+            if txt:
+                return txt
+    return None
+
+
+_DEGREE_SIGNALS = [
+    # (level, regex). The MINIMUM matched level wins (a course accepting
+    # "bachelor's or master's" has a minimum of bachelor's).
+    (0, r"(12th|class\s*12|higher secondary|10\s*\+\s*2|senior secondary)"),
+    (1, r"\bdiploma\b"),
+    (2, r"(bachelor|graduat|under[\s-]?graduate|\bug\b|\bb\.?tech\b|\bb\.?e\b|\bb\.?sc\b|\bb\.?com\b|\bb\.?a\b|any degree)"),
+    (3, r"(master|post[\s-]?graduat|\bpg\b|\bm\.?tech\b|\bm\.?sc\b|\bm\.?com\b|\bm\.?a\b|\bmba\b)"),
+    (4, r"(ph\.?d|doctorate|doctoral)"),
+]
+_LEVEL_TO_DEGREE = {0: "12th", 1: "Diploma", 2: "Bachelor's", 3: "Master's", 4: "PhD"}
+
+
+def _derive_degree_and_marks(text: str) -> tuple[int | None, str | None]:
+    if not text:
+        return None, None
+    marks = _to_int(_first_match(text, r"(\d{2})\s*%\s*(?:aggregate|marks|or above|or higher)?"))
+    low = text.lower()
+    levels = [lvl for lvl, pat in _DEGREE_SIGNALS if re.search(pat, low, re.IGNORECASE)]
+    degree = _LEVEL_TO_DEGREE[min(levels)] if levels else None
+    return marks, degree
+
+
+def _extract_eligibility(soup: BeautifulSoup, faqs: list[dict] | None = None) -> tuple[str | None, int | None, str | None]:
+    """Multi-template fallback chain (Phase 11.2). First match wins."""
+    raw: str | None = None
+
+    # 1. University-partner template: labeled "Eligibility" section.
+    section = _section_by_heading(soup, "Eligibility & Admissions", "Eligibility")
     raw = _text(section)
+
+    # 2. FAQ-embedded eligibility (upGrad Campus / Bootcamp).
+    if not raw:
+        raw = _eligibility_from_faqs(faqs)
+
+    # 3. "Admission Process" / "Who can apply" section.
+    if not raw:
+        section = _section_by_heading(soup, "Admission Process", "Who can apply", "Admissions")
+        raw = _text(section)
+
+    # 4. Summary-card eligibility row.
+    if not raw:
+        raw = _eligibility_from_summary_card(soup)
+
+    # 5. Last resort: a Bachelor's...aggregate sentence anywhere in the body.
     if not raw:
         body = soup.get_text(" ", strip=True)
         m = re.search(r"(Bachelor'?s[^.]{0,200}aggregate[^.]{0,50})", body, re.IGNORECASE)
         raw = m.group(1) if m else None
+
     if not raw:
         return None, None, None
-    marks = _to_int(_first_match(raw, r"(\d{2})%\s*aggregate"))
-    degree = None
-    for candidate in ("Master's", "Masters", "Bachelor's", "Bachelors", "Diploma", "12th"):
-        if re.search(rf"\b{re.escape(candidate)}\b", raw, re.IGNORECASE):
-            degree = candidate.replace("Bachelors", "Bachelor's").replace("Masters", "Master's")
-            break
+
+    # Derive degree + marks from the broader text (eligibility + matching FAQs).
+    derive_source = raw
+    faq_blob = " ".join(
+        f"{f.get('question','')} {f.get('answer','')}"
+        for f in (faqs or [])
+        if _ELIGIBILITY_FAQ_RE.search(f.get("question") or "")
+    )
+    if faq_blob:
+        derive_source = f"{raw} {faq_blob}"
+    marks, degree = _derive_degree_and_marks(derive_source)
     return raw, marks, degree
 
 
@@ -457,7 +533,7 @@ def parse(html: str, slug: str, url: str | None = None) -> dict[str, Any]:
         if title_node is not None:
             hero_tagline = _text(title_node.find_next("p"))
 
-    eligibility_raw, min_marks_pct, min_degree = _extract_eligibility(soup)
+    eligibility_raw, min_marks_pct, min_degree = _extract_eligibility(soup, faqs)
 
     return {
         "slug": slug,

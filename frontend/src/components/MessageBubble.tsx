@@ -10,8 +10,8 @@ export default function MessageBubble({ role, content }: Props) {
       <div
         className={
           isUser
-            ? "max-w-[78%] rounded-2xl rounded-br-md bg-primary text-white px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap"
-            : "max-w-[78%] rounded-2xl rounded-bl-md bg-surface text-ink px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap"
+            ? "max-w-[80%] rounded-2xl rounded-br-sm bg-primary text-white px-4 py-3 text-[15px] leading-relaxed whitespace-pre-wrap"
+            : "max-w-[80%] rounded-2xl rounded-bl-sm bg-surface text-ink px-4 py-3 text-[15px] leading-relaxed whitespace-pre-wrap"
         }
       >
         {content || <TypingDots />}

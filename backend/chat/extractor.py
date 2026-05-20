@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Any
+from datetime import date
 
 from openai import OpenAI
 
@@ -31,6 +32,10 @@ Schema:
 Rules:
 - Only return fields the user clearly stated. Use null for everything else.
 - Don't infer beyond direct statements ("I'm a senior dev" ≠ years_experience).
+- If the user gives a start date or year ("since Jan 2026", "from 2020", "I joined in March '22"), compute years_experience from today's date, rounding down to the nearest integer. 0 if less than a year.
+- If the user gives a duration phrase ("for 3 years", "going on 5 years"), use that integer directly.
+- "Just started", "about to start", "fresher" → years_experience = 0.
+- Do NOT treat company-founding years or product-launch years as personal experience — only personal start-dates.
 - If a user gave a range, use the midpoint as an int.
 - Output ONLY the JSON. No explanation, no markdown fence.
 """
@@ -54,7 +59,8 @@ def extract_slots(history: list[dict[str, str]], latest_user_msg: str, client: O
     model = os.getenv("OPENAI_MODEL_EXTRACT", "gpt-4o-mini")
 
     transcript = _format_history(history)
-    user_block = f"Transcript so far:\n{transcript}\n\nLatest user turn: {latest_user_msg}"
+    prompt_header = f"Today's date is {date.today().isoformat()}. Use this when computing durations from start-dates the user mentions.\n\n"
+    user_block = f"{prompt_header}Transcript so far:\n{transcript}\n\nLatest user turn: {latest_user_msg}"
 
     try:
         resp = client.chat.completions.create(

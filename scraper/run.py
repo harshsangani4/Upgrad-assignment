@@ -239,6 +239,49 @@ def cmd_backfill_faculty() -> int:
     return 0
 
 
+def cmd_rederive_eligibility() -> int:
+    """Re-parse eligibility (+ derive degree/marks) from each saved data/raw/<slug>.html.
+
+    No scraping, no LLM calls. Re-runs the parser's eligibility chain over local HTML
+    so improvements to selectors / FAQ matching / degree derivation take effect without
+    a full re-scrape.
+    """
+    init_db(get_engine())
+    factory = get_session_factory(get_engine())
+    touched = 0
+    filled_elig = 0
+    filled_degree = 0
+    skipped = 0
+    with factory() as session:
+        for course in session.query(Course).order_by(Course.slug).all():
+            html_path = Path(course.raw_html_path or RAW_DIR / f"{course.slug}.html")
+            if not html_path.exists():
+                skipped += 1
+                continue
+            try:
+                html = html_path.read_text(encoding="utf-8")
+            except OSError:
+                skipped += 1
+                continue
+            parsed = parse(html, slug=course.slug, url=course.url)
+            elig = parsed.get("eligibility_raw")
+            if elig:
+                course.eligibility_raw = elig
+                filled_elig += 1
+            if parsed.get("min_degree"):
+                course.min_degree = parsed["min_degree"]
+                filled_degree += 1
+            if parsed.get("min_marks_pct") is not None:
+                course.min_marks_pct = parsed["min_marks_pct"]
+            touched += 1
+        session.commit()
+    print(
+        f"[done] reparsed {touched} courses ({skipped} skipped); "
+        f"eligibility_raw set on {filled_elig}, min_degree on {filled_degree}"
+    )
+    return 0
+
+
 def cmd_one(slug: str) -> int:
     init_db(get_engine())
     url = f"https://www.upgrad.com/{slug}/"
@@ -262,6 +305,8 @@ def main() -> int:
     group.add_argument("--one", metavar="SLUG", help="Run a single slug through the pipeline.")
     group.add_argument("--backfill-faculty", action="store_true",
                        help="Re-parse saved HTML for faculty only; no scraping, no LLM calls.")
+    group.add_argument("--rederive-eligibility", action="store_true",
+                       help="Re-derive min_degree/min_marks_pct from stored eligibility_raw; no scraping, no LLM calls.")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -271,6 +316,8 @@ def main() -> int:
         rc = cmd_refresh()
     elif args.backfill_faculty:
         rc = cmd_backfill_faculty()
+    elif args.rederive_eligibility:
+        rc = cmd_rederive_eligibility()
     else:
         rc = cmd_one(args.one)
     print(f"[time] {time.time() - t0:.1f}s")

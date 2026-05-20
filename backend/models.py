@@ -44,6 +44,7 @@ class Course(Base):
     provider: Mapped[str | None] = mapped_column(String)
     co_brand: Mapped[str | None] = mapped_column(String)
     programme_type: Mapped[str | None] = mapped_column(String)
+    programme_type_key: Mapped[str | None] = mapped_column(String, index=True)
     category: Mapped[str | None] = mapped_column(String, index=True)
 
     duration_weeks: Mapped[int | None] = mapped_column(Integer)
@@ -64,6 +65,7 @@ class Course(Base):
     min_years_exp: Mapped[int | None] = mapped_column(Integer)
     min_degree: Mapped[str | None] = mapped_column(String)
     min_marks_pct: Mapped[int | None] = mapped_column(Integer)
+    eligibility_raw: Mapped[str | None] = mapped_column(Text)
     requires_coding: Mapped[int | None] = mapped_column(Integer)
     requires_quant: Mapped[int | None] = mapped_column(Integer)
     prestige_signal: Mapped[str | None] = mapped_column(String)
