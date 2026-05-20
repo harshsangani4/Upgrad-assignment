@@ -21,11 +21,24 @@ from fastapi.responses import StreamingResponse
 from openai import OpenAI
 from sqlalchemy.orm import Session
 
-from backend.chat.extractor import extract_slots
-from backend.chat.persona import HOOK_MESSAGE, PERSONA_PROMPT
-from backend.chat.planner import BROWSE_ALL, READY, plan_next, record_question
+from backend.chat.extractor import classify_intent, extract_slots
+from backend.chat.persona import (
+    HOOK_MESSAGE,
+    PERSONA_FULL,
+    PERSONA_TURN_REMINDER,
+    build_user_profile_block,
+)
+from backend.chat.planner import (
+    BROWSE_ALL,
+    READY,
+    STEER_BACK,
+    plan_next,
+    record_question,
+    should_steer_back,
+)
 from backend.chat.recommender import browse_top, recommend
-from backend.chat.slots import SLOT_QUICK_REPLIES
+from backend.chat.slots import SLOT_PHRASINGS, SLOT_QUICK_REPLIES
+from backend.chat.summarizer import maybe_summarize
 from backend.models import Course, CourseModule, CourseTag, get_engine, get_session_factory
 from backend.schemas import (
     ChatRequest,
@@ -35,6 +48,14 @@ from backend.schemas import (
     SessionDump,
 )
 from backend.store import db_session, get_or_create_session, get_session
+
+
+# Local directive markers (post-recommendation intents that bypass the slot flow).
+MORE_CARDS = "MORE_CARDS"
+FILTER_CHANGE = "FILTER_CHANGE"
+COMPARE = "COMPARE"
+DONE = "DONE"
+PAGE_SIZE = 3
 
 load_dotenv()
 
@@ -89,49 +110,79 @@ LENGTH_RULES = (
 )
 
 
-def _build_chat_messages(state, planner_hint: str | None, suggested_phrasing: str | None) -> list[dict]:
-    msgs: list[dict] = [{"role": "system", "content": PERSONA_PROMPT}]
+def _directive_text(hint: str | None, phrasing: str | None, state) -> str:
+    """Build the per-turn system directive (length rules + what to do this turn)."""
+    base = LENGTH_RULES + "\n\n"
+    if hint == READY:
+        return base + (
+            "The planner says READY_TO_RECOMMEND. Reply with one warm transition line under "
+            "12 words, then stop. Example: \"Okay, three picks coming up.\" Do not list features."
+        )
+    if hint == BROWSE_ALL:
+        return base + (
+            "The user asked to browse the catalog. Reply with one short handoff line under 15 "
+            "words. Example: \"Here is a quick slice of the catalog, see what catches your eye.\""
+        )
+    if hint == STEER_BACK:
+        last_open = state.open_slots()[0] if state.open_slots() else None
+        ph = (SLOT_PHRASINGS.get(last_open, [phrasing or ""]) or [""])[0]
+        return base + (
+            "The user has drifted off topic. Acknowledge their digression in under 8 words, then "
+            f"gently circle back to what we still need. Suggested phrasing: \"{ph}\"."
+        )
+    if hint == MORE_CARDS:
+        return base + (
+            "The user wants more options. Reply with one short line handing off to the new cards, "
+            "under 15 words. Example: \"Sure, a few more worth a look.\" Do not list features."
+        )
+    if hint == FILTER_CHANGE:
+        return base + (
+            "The user refined what they want. Acknowledge the new constraint in under 10 words, "
+            "then hand off to the refreshed cards. Example: \"Cheaper it is, here is what fits.\""
+        )
+    if hint == COMPARE:
+        return base + (
+            "The user wants a comparison of courses already shown. Compare them in plain prose "
+            "using the recommended-course context. 2 to 4 sentences. No new cards, no bullet lists."
+        )
+    if hint == DONE:
+        return base + (
+            "The user seems satisfied or wrapping up. Reply with one warm, brief closing line. "
+            "Offer to keep going if they want, but do not push."
+        )
+    if hint:
+        ph = phrasing or hint.replace("_", " ")
+        return base + (
+            f"Probe the slot '{hint}' next. Suggested phrasing: \"{ph}\". "
+            "Acknowledge their last reply briefly, then ask exactly that question."
+        )
+    return base
+
+
+def _build_chat_messages(state, directive: str, recent_window: list[dict], is_first_turn: bool) -> list[dict]:
+    msgs: list[dict] = [
+        {"role": "system", "content": PERSONA_FULL if is_first_turn else PERSONA_TURN_REMINDER}
+    ]
+    last_asked = state.asked_history[-1] if state.asked_history else None
+    msgs.append({
+        "role": "system",
+        "content": build_user_profile_block(state.slot_values, state.open_slots(), last_asked),
+    })
+    if state.history_summary:
+        msgs.append({"role": "system", "content": f"Earlier conversation summary: {state.history_summary}"})
     if state.recommended_context:
         msgs.append({
             "role": "system",
             "content": (
-                "Reference: these courses have been recommended to this user in this session. "
-                "If they ask about instructors, faculty, fees, duration, or any other detail, "
-                "answer from this data. Do not pretend to look it up.\n\n"
+                "Reference: these courses have already been shown to this user. Answer follow-up "
+                "questions about instructors, faculty, fees, duration, or any detail from this data. "
+                "Do not say you cannot look it up.\n\n"
                 + json.dumps(state.recommended_context, ensure_ascii=False, indent=2)
             ),
         })
-    msgs.extend(state.messages)
-    if planner_hint == READY:
-        msgs.append({
-            "role": "system",
-            "content": (
-                LENGTH_RULES + "\n\n"
-                "The planner says READY_TO_RECOMMEND. Reply with one short transition line "
-                "in the persona's voice, under 12 words, then stop. Example: \"Okay, three "
-                "picks coming up.\" Do not list features."
-            ),
-        })
-    elif planner_hint == BROWSE_ALL:
-        msgs.append({
-            "role": "system",
-            "content": (
-                LENGTH_RULES + "\n\n"
-                "The user asked to browse the catalog. Reply with one short line that hands "
-                "off to the cards, under 15 words. Example: \"Here is a quick slice of the "
-                "catalog. Tell me what catches your eye.\" Do not list features."
-            ),
-        })
-    elif planner_hint:
-        phrasing = suggested_phrasing or planner_hint.replace("_", " ")
-        msgs.append({
-            "role": "system",
-            "content": (
-                LENGTH_RULES + "\n\n"
-                f"Probe the slot '{planner_hint}' next. Suggested phrasing: \"{phrasing}\". "
-                "Acknowledge their last reply in 5-8 words, then ask exactly that question."
-            ),
-        })
+    msgs.extend(recent_window)
+    if directive:
+        msgs.append({"role": "system", "content": directive})
     return msgs
 
 
@@ -176,56 +227,142 @@ def hook() -> dict:
     return {"message": HOOK_MESSAGE}
 
 
+def _store_recommended_context(state, recommendations: list[dict], *, append: bool) -> None:
+    ctx = [
+        {
+            "slug": r["course_slug"],
+            "title": r["title"],
+            "provider": r.get("provider"),
+            "programme_type": r.get("programme_type"),
+            "duration_label": r.get("duration_label"),
+            "fee_bucket": r.get("fee_bucket"),
+            "why_this_fits": r.get("why_this_fits"),
+            "faculty": r.get("faculty") or [],
+        }
+        for r in recommendations
+    ]
+    slugs = [r["course_slug"] for r in recommendations]
+    if append:
+        state.recommended_context += ctx
+        state.recommended_slugs += [s for s in slugs if s not in state.recommended_slugs]
+    else:
+        state.recommended_context = ctx
+        state.recommended_slugs = list(slugs)
+
+
+def _progress(state) -> dict:
+    from backend.chat.slots import HARD_SLOTS
+
+    filled = sum(1 for s in HARD_SLOTS if state.slot_values.get(s) not in (None, "", []))
+    return {"filled": filled, "total": len(HARD_SLOTS)}
+
+
+def _plan_turn(state, message: str, client: OpenAI) -> dict:
+    """Decide what this turn does. Returns a dict of directives + any recommendations."""
+    # Post-recommendation intents only matter once cards exist.
+    intent_info = {"intent": "answering", "filter_override": None}
+    if state.recommended_context:
+        intent_info = classify_intent(message, state.messages, client=client)
+    intent = intent_info["intent"]
+
+    factory = get_session_factory(get_engine())
+
+    if intent == "more_cards" and state.recommended_context:
+        with factory() as db:
+            recs = recommend(
+                db, state.slot_values, state.messages, client=client,
+                offset=state.pagination_offset, limit=PAGE_SIZE,
+                filter_override=state.last_filter_override,
+                exclude_slugs=set(state.recommended_slugs),
+            )
+        state.pagination_offset += len(recs)
+        _store_recommended_context(state, recs, append=True)
+        return {"hint": MORE_CARDS, "phrasing": None, "recommendations": recs, "quick_slot": None}
+
+    if intent == "filter_change" and state.recommended_context:
+        override = intent_info.get("filter_override") or {}
+        state.last_filter_override = override
+        state.pagination_offset = 0
+        state.recommended_slugs = []
+        with factory() as db:
+            recs = recommend(
+                db, state.slot_values, state.messages, client=client,
+                offset=0, limit=PAGE_SIZE, filter_override=override,
+            )
+        state.pagination_offset = len(recs)
+        _store_recommended_context(state, recs, append=False)
+        return {"hint": FILTER_CHANGE, "phrasing": None, "recommendations": recs, "quick_slot": None}
+
+    if intent == "compare" and state.recommended_context:
+        return {"hint": COMPARE, "phrasing": None, "recommendations": [], "quick_slot": None}
+
+    if intent == "done":
+        return {"hint": DONE, "phrasing": None, "recommendations": [], "quick_slot": None}
+
+    # Normal flow: extract slots, track off-topic streak, plan next slot.
+    updates = extract_slots(state.messages, message, client=client)
+    newly_filled = state.merge_extracted(updates)
+    state.empty_extract_streak = 0 if updates else state.empty_extract_streak + 1
+    if newly_filled:
+        # ranking basis changed: reset pagination
+        state.pagination_offset = 0
+        state.last_filter_override = None
+
+    hint, phrasing = plan_next(state, latest_user_msg=message)
+
+    if hint not in (READY, BROWSE_ALL) and should_steer_back(state):
+        return {"hint": STEER_BACK, "phrasing": phrasing, "recommendations": [], "quick_slot": None}
+
+    already_recommended = bool(state.recommended_context)
+
+    # If we've already shown cards and nothing new came in, this is a follow-up
+    # question, not a re-recommend. Answer it conversationally from the context.
+    if hint == READY and already_recommended and not newly_filled:
+        return {"hint": None, "phrasing": None, "recommendations": [], "quick_slot": None}
+
+    recs: list[dict] = []
+    if hint == READY:
+        with factory() as db:
+            recs = recommend(db, state.slot_values, state.messages, client=client, offset=0, limit=PAGE_SIZE)
+        state.pagination_offset = len(recs)
+        _store_recommended_context(state, recs, append=False)
+    elif hint == BROWSE_ALL:
+        with factory() as db:
+            recs = browse_top(db, state.slot_values, n=8)
+        _store_recommended_context(state, recs, append=False)
+
+    quick_slot = hint if hint not in (READY, BROWSE_ALL) else None
+    return {"hint": hint, "phrasing": phrasing, "recommendations": recs, "quick_slot": quick_slot}
+
+
 @app.post("/api/chat")
 def chat(req: ChatRequest):
-    """Stream a single assistant turn via SSE.
-
-    Flow: extract slots from `req.message` → merge into session → planner picks next
-    slot or READY → if READY, run recommender and emit a `recommendations` event
-    alongside the streamed transition message; otherwise stream a question turn.
-    """
+    """Stream a single assistant turn via SSE."""
     state = get_or_create_session(req.session_id)
+    is_first_turn = not any(m["role"] == "assistant" for m in state.messages)
     state.messages.append({"role": "user", "content": req.message})
 
     client = _openai()
-    updates = extract_slots(state.messages, req.message, client=client)
-    state.merge_extracted(updates)
-    planner_hint, suggested_phrasing = plan_next(state, latest_user_msg=req.message)
+    turn = _plan_turn(state, req.message, client)
+    hint = turn["hint"]
+
+    # Long-conversation: summarize older turns, keep recent window.
+    state.history_summary, recent_window = maybe_summarize(
+        state.messages, state.history_summary, client=client
+    )
+
+    directive = _directive_text(hint, turn["phrasing"], state)
+    messages_for_llm = _build_chat_messages(state, directive, recent_window, is_first_turn)
 
     def event_stream() -> Iterator[bytes]:
         yield _sse("session", {"session_id": state.session_id}).encode("utf-8")
+        yield _sse("progress", _progress(state)).encode("utf-8")
 
-        # If we're going to ask a slot question, offer chips
-        if planner_hint and planner_hint not in (READY, BROWSE_ALL):
-            chips = SLOT_QUICK_REPLIES.get(planner_hint, [])
+        if turn["quick_slot"]:
+            chips = SLOT_QUICK_REPLIES.get(turn["quick_slot"], [])
             if chips:
-                yield _sse("quick_replies", {"slot": planner_hint, "options": chips}).encode("utf-8")
+                yield _sse("quick_replies", {"slot": turn["quick_slot"], "options": chips}).encode("utf-8")
 
-        recommendations: list[dict] = []
-        if planner_hint == READY:
-            factory = get_session_factory(get_engine())
-            with factory() as db:
-                recommendations = recommend(db, state.slot_values, state.messages, client=client)
-        elif planner_hint == BROWSE_ALL:
-            factory = get_session_factory(get_engine())
-            with factory() as db:
-                recommendations = browse_top(db, state.slot_values, n=8)
-
-        if recommendations:
-            state.recommended_context = [
-                {
-                    "slug": r["course_slug"],
-                    "title": r["title"],
-                    "provider": r.get("provider"),
-                    "duration_label": r.get("duration_label"),
-                    "fee_bucket": r.get("fee_bucket"),
-                    "why_this_fits": r.get("why_this_fits"),
-                    "faculty": r.get("faculty") or [],
-                }
-                for r in recommendations
-            ]
-
-        messages_for_llm = _build_chat_messages(state, planner_hint, suggested_phrasing)
         assistant_buf: list[str] = []
         try:
             for token in _stream_assistant(messages_for_llm, client):
@@ -238,11 +375,12 @@ def chat(req: ChatRequest):
         full_text = "".join(assistant_buf).strip()
         if full_text:
             state.messages.append({"role": "assistant", "content": full_text})
-        if planner_hint and planner_hint not in (READY, BROWSE_ALL):
-            record_question(state, planner_hint)
+        if turn["quick_slot"]:
+            record_question(state, turn["quick_slot"])
 
-        if recommendations:
-            yield _sse("recommendations", {"items": recommendations}).encode("utf-8")
+        if turn["recommendations"]:
+            mode = "append" if hint == MORE_CARDS else "replace"
+            yield _sse("recommendations", {"items": turn["recommendations"], "mode": mode}).encode("utf-8")
         yield _sse("done", {"ok": True}).encode("utf-8")
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -253,7 +391,19 @@ def force_recommend(req: RecommendRequest, db: Session = Depends(db_session)):
     state = get_session(req.session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="session not found")
-    return recommend(db, state.slot_values, state.messages, client=_openai())
+    exclude = set(state.recommended_slugs) if req.offset > 0 else None
+    recs = recommend(
+        db, state.slot_values, state.messages, client=_openai(),
+        offset=req.offset, limit=req.limit, filter_override=req.filter_override,
+        exclude_slugs=exclude,
+    )
+    if req.offset == 0:
+        _store_recommended_context(state, recs, append=False)
+        state.pagination_offset = len(recs)
+    else:
+        _store_recommended_context(state, recs, append=True)
+        state.pagination_offset = req.offset + len(recs)
+    return recs
 
 
 @app.get("/api/courses/{slug}", response_model=CourseDetail)

@@ -20,6 +20,7 @@ from .slots import HARD_SLOTS, SLOT_BY_NAME, SLOT_PHRASINGS, SLOTS
 
 READY = "READY_TO_RECOMMEND"
 BROWSE_ALL = "BROWSE_ALL"
+STEER_BACK = "STEER_BACK"
 
 # Heuristic: user said something that means "stop interviewing me, recommend".
 SHOW_ME_RE = re.compile(
@@ -53,6 +54,13 @@ class SessionState:
     asked_history: list[str] = field(default_factory=list)
     attempts: Counter = field(default_factory=Counter)
     recommended_context: list[dict[str, Any]] = field(default_factory=list)
+    # Phase 8.3 long-conversation memory
+    history_summary: str | None = None
+    empty_extract_streak: int = 0
+    # Phase 8.4 pagination / filter refinement
+    pagination_offset: int = 0
+    last_filter_override: dict[str, Any] | None = None
+    recommended_slugs: list[str] = field(default_factory=list)
 
     def merge_extracted(self, updates: dict[str, Any]) -> list[str]:
         """Merge new slot values; return the list of slots that newly transitioned to filled."""
@@ -64,6 +72,12 @@ class SessionState:
                 newly_filled.append(k)
             self.slot_values[k] = v
         return newly_filled
+
+    def open_slots(self) -> list[str]:
+        """Hard slots not yet filled, then soft slots not yet filled."""
+        order = [name for (name, _, hard, _) in SLOTS if hard]
+        order += [name for (name, _, hard, _) in SLOTS if not hard]
+        return [s for s in order if self.slot_values.get(s) in (None, "", [])]
 
 
 def _is_filled(state: SessionState, slot_name: str) -> bool:
@@ -126,7 +140,12 @@ def plan_next(state: SessionState, latest_user_msg: str = "") -> tuple[str, str 
 
 def record_question(state: SessionState, slot_name: str) -> None:
     """Mark that the assistant just asked about `slot_name`."""
-    if slot_name in (READY, BROWSE_ALL):
+    if slot_name in (READY, BROWSE_ALL, STEER_BACK):
         return
     state.asked_history.append(slot_name)
     state.attempts[slot_name] += 1
+
+
+def should_steer_back(state: SessionState) -> bool:
+    """True when the user has gone off-topic for 2+ consecutive turns and a slot is still open."""
+    return state.empty_extract_streak >= 2 and bool(state.open_slots())

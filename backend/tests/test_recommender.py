@@ -1,4 +1,5 @@
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -132,3 +133,80 @@ def test_recommend_falls_back_when_rerank_returns_nothing(session):
     assert len(results) == 3
     for r in results:
         assert r["why_this_fits"]
+        # new schema: fit_reasons always present (auto-generated on fallback)
+        assert isinstance(r["fit_reasons"], list) and len(r["fit_reasons"]) >= 1
+
+
+# ---------- filter override ----------------------------------------------------
+
+def test_hard_filter_override_prestige(session):
+    slots = {"years_experience": 5, "min_marks_pct_est": 80, "weekly_hours": 12,
+             "format_preference": "online"}
+    candidates = hard_filter(session, slots, filter_override={"prestige_signal": ["iim"]})
+    assert {c.slug for c in candidates} == {"iim-mba"}
+
+
+def test_hard_filter_override_fee_max(session):
+    slots = {"years_experience": 5, "min_marks_pct_est": 80, "weekly_hours": 12,
+             "format_preference": "online"}
+    candidates = hard_filter(session, slots, filter_override={"fee_bucket_max": "1-3L"})
+    # only courses at <=1-3L survive
+    assert all(c.fee_bucket in {"<1L", "1-3L"} for c in candidates)
+    assert "iim-mba" not in {c.slug for c in candidates}  # 5-10L
+
+
+# ---------- pagination ---------------------------------------------------------
+
+class EchoOpenAI:
+    """Reranker stub: picks the first `n_picks` candidate slugs found in the prompt."""
+
+    def __init__(self):
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._chat))
+        self.embeddings = SimpleNamespace(create=self._emb)
+
+    def _chat(self, **kwargs):
+        content = kwargs["messages"][-1]["content"]
+        slugs = [s for s in re.findall(r'"slug":\s*"([^"]+)"', content) if s != "..."]
+        m = re.search(r"picking the (\d+) best", content)
+        n = int(m.group(1)) if m else 3
+        picks = [
+            {"slug": s, "why_this_fits": f"fits your 5 years ({s})",
+             "fit_reasons": ["your 5 years"], "watch_outs": None}
+            for s in slugs[:n]
+        ]
+        body = json.dumps({"picks": picks})
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=body))])
+
+    def _emb(self, **kwargs):
+        n = len(kwargs.get("input") or [])
+        return SimpleNamespace(data=[SimpleNamespace(embedding=[0.1] * 1536, index=i) for i in range(n)])
+
+
+@pytest.fixture
+def big_session():
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    factory = get_session_factory(engine)
+    with factory() as s:
+        # 8 permissive courses that all pass a 5-yr coder filter
+        for i in range(8):
+            s.add(_seed_course(
+                slug=f"course-{i:02d}", title=f"Course {i}",
+                min_years_exp=0, requires_coding=0, min_marks_pct=50,
+                min_degree="Bachelor's", fee_bucket="<1L", format="online",
+            ))
+        s.commit()
+        yield s
+
+
+def test_recommender_pagination(big_session):
+    slots = {"years_experience": 5, "can_code": True, "min_marks_pct_est": 80,
+             "weekly_hours": 20, "format_preference": "online", "education_level": "bachelors"}
+    fake = EchoOpenAI()
+    page1 = recommend(big_session, slots, messages=[], client=fake, offset=0, limit=3)
+    page2 = recommend(big_session, slots, messages=[], client=fake, offset=3, limit=3,
+                      exclude_slugs={r["course_slug"] for r in page1})
+    s1 = {r["course_slug"] for r in page1}
+    s2 = {r["course_slug"] for r in page2}
+    assert len(s1) == 3 and len(s2) == 3
+    assert s1.isdisjoint(s2)  # no repeats across pages

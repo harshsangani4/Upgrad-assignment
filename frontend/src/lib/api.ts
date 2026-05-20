@@ -5,9 +5,14 @@ export type Recommendation = {
   course_url: string;
   title: string;
   provider: string | null;
+  programme_type?: string | null;
   duration_label: string | null;
+  level?: string | null;
+  format?: string | null;
   fee_bucket: string | null;
   why_this_fits: string;
+  fit_reasons?: string[];
+  watch_outs?: string | null;
   faculty?: Faculty[];
 };
 
@@ -16,17 +21,19 @@ export type QuickReplyPayload = {
   options: string[];
 };
 
+export type Progress = { filled: number; total: number };
+
 export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
-  recommendations?: Recommendation[];
   quickReplies?: QuickReplyPayload;
 };
 
 export type StreamEvent =
   | { type: "session"; sessionId: string }
+  | { type: "progress"; progress: Progress }
   | { type: "token"; value: string }
-  | { type: "recommendations"; items: Recommendation[] }
+  | { type: "recommendations"; items: Recommendation[]; mode: "replace" | "append" }
   | { type: "quick_replies"; payload: QuickReplyPayload }
   | { type: "error"; message: string }
   | { type: "done" };
@@ -55,10 +62,16 @@ function parseEventBlock(block: string): StreamEvent | null {
   switch (event) {
     case "session":
       return { type: "session", sessionId: payload.session_id };
+    case "progress":
+      return { type: "progress", progress: { filled: payload.filled ?? 0, total: payload.total ?? 0 } };
     case "token":
       return { type: "token", value: payload.value ?? "" };
     case "recommendations":
-      return { type: "recommendations", items: payload.items ?? [] };
+      return {
+        type: "recommendations",
+        items: payload.items ?? [],
+        mode: payload.mode === "append" ? "append" : "replace",
+      };
     case "quick_replies":
       return {
         type: "quick_replies",
@@ -107,6 +120,20 @@ export async function streamChat(
     const evt = parseEventBlock(buffer);
     if (evt) onEvent(evt);
   }
+}
+
+export async function fetchMore(
+  sessionId: string,
+  offset: number,
+  limit = 3
+): Promise<Recommendation[]> {
+  const resp = await fetch(`${API_BASE}/api/recommend`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, offset, limit }),
+  });
+  if (!resp.ok) throw new Error(`recommend failed: ${resp.status}`);
+  return (await resp.json()) as Recommendation[];
 }
 
 export async function fetchHook(): Promise<string> {

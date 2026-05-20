@@ -14,6 +14,9 @@ class ChatRequest(BaseModel):
 
 class RecommendRequest(BaseModel):
     session_id: str
+    offset: int = 0
+    limit: int = 3
+    filter_override: dict[str, Any] | None = None
 
 
 class Recommendation(BaseModel):
@@ -21,9 +24,14 @@ class Recommendation(BaseModel):
     course_url: str
     title: str
     provider: str | None = None
+    programme_type: str | None = None
     duration_label: str | None = None
+    level: str | None = None
+    format: str | None = None
     fee_bucket: str | None = None
     why_this_fits: str
+    fit_reasons: list[str] = Field(default_factory=list)
+    watch_outs: str | None = None
     faculty: list[dict[str, str]] = Field(default_factory=list)
 
 

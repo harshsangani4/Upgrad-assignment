@@ -16,24 +16,35 @@ from backend.models import Course
 
 
 RERANK_PROMPT_TEMPLATE = """\
-You are picking the 3 best upGrad courses for this user.
+You are picking the {n_picks} best upGrad courses for this user.
 
 Inputs:
 - User profile (filled slots): {profile_json}
 - Recent conversation: {last_6_messages}
-- 8 candidate courses (already pre-filtered for hard constraints): {candidates_json}
+- Candidate courses (already pre-filtered for hard constraints): {candidates_json}
 
-Pick exactly 3. Optimize for fit, not variety. If two courses are similarly good, prefer the one whose vibe and prestige_signal match the user's vibe_preference and prestige_preference.
+Pick exactly {n_picks}. Optimize for fit, not variety. If two courses are similarly good, prefer the one whose vibe and prestige_signal match the user's vibe_preference and prestige_preference.
 
 Output STRICT JSON only:
 {{
   "picks": [
-    {{"slug": "...", "why_this_fits": "one sentence, 18 words max, in the same warm tone as the chat"}},
-    ...
+    {{
+      "slug": "...",
+      "why_this_fits": "one sentence, 18 words max, in the same warm tone as the chat",
+      "fit_reasons": [
+        "short phrase referencing a concrete profile value (e.g. 'Matches your 5 years in product')",
+        "another concrete match (e.g. 'Online + weekend cohort fits your 8h/week')",
+        "a third (e.g. 'IIM brand you asked for')"
+      ],
+      "watch_outs": "one short sentence on what might NOT fit this user, or null"
+    }}
   ]
 }}
 
-The "why_this_fits" sentence must reference something concrete from the user's situation. No marketing speak.
+Rules:
+- "why_this_fits" and every entry in "fit_reasons" must reference a CONCRETE value from the user's profile (their years, hours, budget, goal, brand preference). Write "your 5 years", not "your experience".
+- 2 to 3 fit_reasons per pick. Each under 12 words. No marketing speak.
+- "watch_outs" is honest, not a sales hedge. Use null if there is genuinely nothing.
 """
 
 
@@ -97,12 +108,36 @@ def _passes_python_filters(course: Course, slot_values: dict[str, Any]) -> bool:
     return True
 
 
-def hard_filter(session: Session, slot_values: dict[str, Any]) -> list[Course]:
+def _passes_override(course: Course, override: dict[str, Any]) -> bool:
+    """Apply a one-shot filter override (from a 'cheaper'/'IIM only' style request)."""
+    fb_max = override.get("fee_bucket_max")
+    if fb_max in BUDGET_ORDER and course.fee_bucket in BUDGET_ORDER:
+        if BUDGET_ORDER[course.fee_bucket] > BUDGET_ORDER[fb_max]:
+            return False
+    prestige = override.get("prestige_signal")
+    if prestige:
+        if course.prestige_signal not in prestige:
+            return False
+    fmt = override.get("format")
+    if fmt:
+        if course.format not in fmt:
+            return False
+    return True
+
+
+def hard_filter(
+    session: Session,
+    slot_values: dict[str, Any],
+    filter_override: dict[str, Any] | None = None,
+) -> list[Course]:
     q = session.query(Course)
     for cond in _build_sql_filters(slot_values):
         q = q.filter(cond)
     candidates = q.all()
-    return [c for c in candidates if _passes_python_filters(c, slot_values)]
+    out = [c for c in candidates if _passes_python_filters(c, slot_values)]
+    if filter_override:
+        out = [c for c in out if _passes_override(c, filter_override)]
+    return out
 
 
 # ---------- Stage 2: embedding similarity ---------------------------------------
@@ -222,15 +257,47 @@ def _last_6_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     return messages[-6:]
 
 
-def _course_to_card(c: Course, why: str) -> dict[str, Any]:
+def _auto_fit_reasons(c: Course, slot_values: dict[str, Any]) -> list[str]:
+    """Deterministic fit reasons used when the rerank LLM is unavailable."""
+    reasons: list[str] = []
+    yrs = slot_values.get("years_experience")
+    if isinstance(yrs, int) and c.level:
+        reasons.append(f"Suits your {yrs} years at {c.level} level")
+    fp = slot_values.get("format_preference")
+    if fp and c.format:
+        reasons.append(f"{c.format.title()} format, matching your preference")
+    wh = slot_values.get("weekly_hours")
+    if isinstance(wh, int) and c.weekly_hours:
+        reasons.append(f"About {int(c.weekly_hours)}h/week, within your {wh}h budget")
+    pp = slot_values.get("prestige_preference")
+    if pp and c.prestige_signal and c.prestige_signal not in ("none", None):
+        reasons.append(f"{c.prestige_signal.upper()} brand on the certificate")
+    if not reasons:
+        reasons.append(c.one_line_pitch or f"{c.programme_type or 'A solid program'} from {c.provider or 'upGrad'}")
+    return reasons[:3]
+
+
+def _course_to_card(
+    c: Course,
+    why: str,
+    fit_reasons: list[str] | None = None,
+    watch_outs: str | None = None,
+    slot_values: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    reasons = fit_reasons if fit_reasons else _auto_fit_reasons(c, slot_values or {})
     return {
         "course_slug": c.slug,
         "course_url": c.url,
         "title": c.title,
         "provider": c.provider,
+        "programme_type": c.programme_type,
         "duration_label": c.duration_label,
+        "level": c.level,
+        "format": c.format,
         "fee_bucket": c.fee_bucket,
         "why_this_fits": why,
+        "fit_reasons": reasons,
+        "watch_outs": watch_outs,
         "faculty": _faculty_for(c, limit=4),
     }
 
@@ -240,14 +307,19 @@ def rerank_and_format(
     slot_values: dict[str, Any],
     messages: list[dict[str, str]],
     client: OpenAI | None = None,
+    limit: int = 3,
+    exclude_slugs: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Call the rerank LLM; return 3 (or fewer) result cards."""
+    """Call the rerank LLM; return up to `limit` result cards with fit_reasons + watch_outs."""
+    exclude_slugs = exclude_slugs or set()
+    candidates = [c for c in candidates if c.slug not in exclude_slugs]
     if not candidates:
         return []
     client = client or OpenAI()
     model = os.getenv("OPENAI_MODEL_RERANK", "gpt-4o")
 
     payload = RERANK_PROMPT_TEMPLATE.format(
+        n_picks=limit,
         profile_json=json.dumps(slot_values, ensure_ascii=False),
         last_6_messages=json.dumps(_last_6_messages(messages), ensure_ascii=False),
         candidates_json=json.dumps([_candidate_summary(c) for c in candidates], ensure_ascii=False),
@@ -263,38 +335,66 @@ def rerank_and_format(
             messages=[{"role": "user", "content": payload}],
         )
         raw = json.loads(resp.choices[0].message.content or "{}")
-        for pick in (raw.get("picks") or [])[:3]:
+        for pick in (raw.get("picks") or [])[:limit]:
             slug = pick.get("slug")
             why = (pick.get("why_this_fits") or "").strip()
-            if slug in by_slug and why:
-                picks.append(_course_to_card(by_slug[slug], why))
+            if slug not in by_slug or not why:
+                continue
+            reasons = [r.strip() for r in (pick.get("fit_reasons") or []) if isinstance(r, str) and r.strip()]
+            watch = pick.get("watch_outs")
+            watch = watch.strip() if isinstance(watch, str) and watch.strip() else None
+            picks.append(_course_to_card(
+                by_slug[slug], why,
+                fit_reasons=reasons or None,
+                watch_outs=watch,
+                slot_values=slot_values,
+            ))
     except Exception:
         picks = []
 
-    # Fallback: if rerank fails or returns < 3, pad with embedding-order top picks.
-    if len(picks) < 3:
+    # Fallback: pad with embedding-order picks if the LLM returned too few.
+    if len(picks) < limit:
         seen = {p["course_slug"] for p in picks}
         for c in candidates:
             if c.slug in seen:
                 continue
-            picks.append(_course_to_card(c, c.one_line_pitch or "A solid fit for what you described."))
-            if len(picks) == 3:
+            picks.append(_course_to_card(
+                c, c.one_line_pitch or "A solid fit for what you described.",
+                slot_values=slot_values,
+            ))
+            if len(picks) == limit:
                 break
 
-    return picks[:3]
+    return picks[:limit]
 
 
 # ---------- top-level entry points ----------------------------------------------
+
+CANDIDATE_POOL = 30
+
 
 def recommend(
     session: Session,
     slot_values: dict[str, Any],
     messages: list[dict[str, str]],
     client: OpenAI | None = None,
+    offset: int = 0,
+    limit: int = 3,
+    filter_override: dict[str, Any] | None = None,
+    exclude_slugs: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    candidates = hard_filter(session, slot_values)
-    top_8 = top_n_by_similarity(candidates, slot_values, n=8, client=client)
-    return rerank_and_format(top_8, slot_values, messages, client=client)
+    """3-stage recommend with pagination + one-shot filter override.
+
+    Stage 1 hard-filters to up to CANDIDATE_POOL courses. Stage 2 sorts the whole pool
+    by embedding similarity. Stage 3 reranks the window of 8 starting at `offset` and
+    returns `limit` cards. `offset=0` reproduces the original top picks.
+    """
+    candidates = hard_filter(session, slot_values, filter_override=filter_override)
+    ranked = top_n_by_similarity(candidates, slot_values, n=CANDIDATE_POOL, client=client)
+    window = ranked[offset : offset + 8]
+    return rerank_and_format(
+        window, slot_values, messages, client=client, limit=limit, exclude_slugs=exclude_slugs
+    )
 
 
 PRESTIGE_WEIGHT = {"iit": 4, "iim": 4, "iiit": 3, "global_uni": 2, "industry_only": 1, "none": 0}
