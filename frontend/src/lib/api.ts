@@ -14,6 +14,17 @@ export type Recommendation = {
   fit_reasons?: string[];
   watch_outs?: string | null;
   faculty?: Faculty[];
+  emi_starts_from_inr?: number | null;
+  min_years_exp?: number | null;
+  // Phase 9.6 — auto-scroll glow
+  addedAt?: number;
+};
+
+export type AttachedCourse = {
+  slug: string;
+  title: string;
+  provider: string | null;
+  logoUrl?: string | null;
 };
 
 export type QuickReplyPayload = {
@@ -23,10 +34,33 @@ export type QuickReplyPayload = {
 
 export type Progress = { filled: number; total: number };
 
+export type ComparisonCourse = {
+  slug: string;
+  title: string;
+  provider: string | null;
+  logo_url: string | null;
+  duration_label: string | null;
+  format: string | null;
+  level: string | null;
+  fee_bucket: string | null;
+  emi_starts_from_inr: number | null;
+  min_years_exp: number | null;
+  min_degree: string | null;
+  top_tools: string[];
+  target_roles_top: string[];
+};
+
+export type ComparisonResult = {
+  comparison_id: string;
+  courses: ComparisonCourse[];
+  summary: string;
+};
+
 export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   quickReplies?: QuickReplyPayload;
+  comparison?: ComparisonResult;
 };
 
 export type StreamEvent =
@@ -86,20 +120,20 @@ function parseEventBlock(block: string): StreamEvent | null {
   }
 }
 
-export async function streamChat(
-  sessionId: string | null,
-  message: string,
+async function _streamEvents(
+  url: string,
+  body: object,
   onEvent: (event: StreamEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
-  const resp = await fetch(`${API_BASE}/api/chat`, {
+  const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, message }),
+    body: JSON.stringify(body),
     signal,
   });
   if (!resp.ok || !resp.body) {
-    throw new Error(`chat request failed: ${resp.status}`);
+    throw new Error(`request failed: ${resp.status}`);
   }
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
@@ -122,6 +156,35 @@ export async function streamChat(
   }
 }
 
+export async function streamChat(
+  sessionId: string | null,
+  message: string,
+  onEvent: (event: StreamEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  return _streamEvents(
+    `${API_BASE}/api/chat`,
+    { session_id: sessionId, message },
+    onEvent,
+    signal
+  );
+}
+
+export async function streamCourseAsk(
+  slug: string,
+  sessionId: string | null,
+  message: string,
+  onEvent: (event: StreamEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  return _streamEvents(
+    `${API_BASE}/api/course/${encodeURIComponent(slug)}/ask`,
+    { session_id: sessionId, message },
+    onEvent,
+    signal
+  );
+}
+
 export async function fetchMore(
   sessionId: string,
   offset: number,
@@ -134,6 +197,19 @@ export async function fetchMore(
   });
   if (!resp.ok) throw new Error(`recommend failed: ${resp.status}`);
   return (await resp.json()) as Recommendation[];
+}
+
+export async function fetchComparison(
+  sessionId: string,
+  slugs: string[]
+): Promise<ComparisonResult> {
+  const resp = await fetch(`${API_BASE}/api/compare`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, slugs }),
+  });
+  if (!resp.ok) throw new Error(`compare failed: ${resp.status}`);
+  return (await resp.json()) as ComparisonResult;
 }
 
 export async function fetchHook(): Promise<string> {

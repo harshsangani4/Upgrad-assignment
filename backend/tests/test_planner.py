@@ -1,4 +1,4 @@
-from backend.chat.planner import BROWSE_ALL, READY, SessionState, plan_next, record_question
+from backend.chat.planner import BROWSE_ALL, READY, CONFIRM_RECOMMEND, SessionState, plan_next, record_question
 from backend.chat.slots import HARD_SLOTS, SLOT_BY_NAME, SOFT_SLOTS
 
 
@@ -41,7 +41,8 @@ def test_three_strike_attaches_gentle_phrasing():
 def test_ready_when_user_says_show_me():
     state = SessionState(session_id="t5")
     next_slot, _ = plan_next(state, "just show me the picks")
-    assert next_slot == READY
+    # Phase 9.3: with 0 slots, "show me" falls through to asking the first slot
+    assert next_slot not in (READY, CONFIRM_RECOMMEND)
 
 
 def test_browse_when_user_asks_to_list_courses():

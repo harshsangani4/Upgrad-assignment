@@ -3,6 +3,7 @@ import { ArrowDown } from "lucide-react";
 import MessageBubble from "./MessageBubble";
 import TypingIndicator from "./TypingIndicator";
 import QuickReplies from "./QuickReplies";
+import ComparisonMessage from "./ComparisonMessage";
 import type { ChatMessage } from "../lib/api";
 
 type Props = {
@@ -41,16 +42,26 @@ export default function ChatWindow({ messages, streaming, awaitingFirstToken, on
       <div
         ref={scrollRef}
         onScroll={() => setNearBottom(isNearBottom())}
-        className="h-full overflow-y-auto px-4 py-6"
+        className="h-full overflow-y-auto px-6 py-8"
       >
-        <div className="max-w-2xl mx-auto">
+        <div className="max-w-2xl mx-auto space-y-4">
           {messages.map((m, i) => {
             const isLast = i === lastIndex;
+            const prevRole = i > 0 ? messages[i - 1].role : null;
+            // Tighter gap for user→assistant Q-A pairs
+            const isReply = m.role === "assistant" && prevRole === "user";
+
             return (
-              <div key={i}>
-                <MessageBubble role={m.role} content={m.content} />
+              <div key={i} className={isReply ? "-mt-2" : ""}>
+                {m.comparison ? (
+                  <ComparisonMessage data={m.comparison} />
+                ) : (
+                  <MessageBubble role={m.role} content={m.content} />
+                )}
                 {isLast && m.role === "assistant" && m.quickReplies && !streaming && (
-                  <QuickReplies options={m.quickReplies.options} onPick={onQuickReply} />
+                  <div className="mt-2">
+                    <QuickReplies options={m.quickReplies.options} onPick={onQuickReply} />
+                  </div>
                 )}
               </div>
             );

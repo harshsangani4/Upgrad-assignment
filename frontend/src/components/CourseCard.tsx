@@ -1,7 +1,14 @@
-import { ArrowRight, AlertTriangle, Check } from "lucide-react";
+import { ArrowRight, AlertTriangle, Check, MessageCircle, GripVertical, GitCompareArrows } from "lucide-react";
 import type { Recommendation } from "../lib/api";
+import type { AttachedCourse } from "./CourseChip";
 
-type Props = { rec: Recommendation };
+type Props = {
+  rec: Recommendation;
+  onAskAbout: (course: AttachedCourse) => void;
+  selected?: boolean;
+  onToggleCompare: () => void;
+  compareDisabled?: boolean;
+};
 
 function initials(provider: string | null): string {
   if (!provider) return "uG";
@@ -10,12 +17,39 @@ function initials(provider: string | null): string {
   return (words[0][0] + words[words.length - 1][0]).toUpperCase();
 }
 
-export default function CourseCard({ rec }: Props) {
+export default function CourseCard({ rec, onAskAbout, selected, onToggleCompare, compareDisabled }: Props) {
   const chips = [rec.duration_label, rec.format, rec.level, rec.fee_bucket].filter(Boolean) as string[];
   const reasons = rec.fit_reasons && rec.fit_reasons.length > 0 ? rec.fit_reasons : [rec.why_this_fits];
 
+  const attachedCourse: AttachedCourse = {
+    slug: rec.course_slug,
+    title: rec.title,
+    provider: rec.provider,
+  };
+
+  const handleDragStart = (e: React.DragEvent<HTMLDivElement>) => {
+    e.dataTransfer.setData(
+      "application/upgrad-course",
+      JSON.stringify(attachedCourse)
+    );
+    e.dataTransfer.effectAllowed = "copy";
+  };
+
+  const handleAskAbout = () => {
+    onAskAbout(attachedCourse);
+  };
+
   return (
-    <div className="group flex flex-col rounded-2xl border border-border bg-white p-5 shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-200 slide-up">
+    <div
+      draggable
+      onDragStart={handleDragStart}
+      className="group relative flex flex-col rounded-2xl border border-border bg-white p-5 shadow-md hover:shadow-xl hover:-translate-y-1 transition-all duration-200 slide-up cursor-grab active:cursor-grabbing"
+    >
+      {/* Drag handle */}
+      <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-40 transition-opacity text-ink-soft">
+        <GripVertical size={16} />
+      </div>
+
       <div className="flex items-center gap-3 mb-3">
         <div className="flex items-center justify-center w-11 h-11 rounded-full border border-border bg-surface text-primary-dark font-semibold text-sm shrink-0">
           {initials(rec.provider)}
@@ -68,14 +102,41 @@ export default function CourseCard({ rec }: Props) {
         </div>
       )}
 
-      <a
-        href={rec.course_url}
-        target="_blank"
-        rel="noreferrer noopener"
-        className="btn-primary w-full mt-auto"
-      >
-        View course <ArrowRight size={16} />
-      </a>
+      {/* Actions row */}
+      <div className="mt-auto flex gap-2">
+        <a
+          href={rec.course_url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="btn-primary flex-1"
+        >
+          View course <ArrowRight size={16} />
+        </a>
+
+        <button
+          type="button"
+          onClick={handleAskAbout}
+          title="Ask about this course"
+          className="btn-ghost border border-border rounded-md px-2.5 py-2 shrink-0"
+        >
+          <MessageCircle size={15} />
+        </button>
+
+        <button
+          type="button"
+          onClick={onToggleCompare}
+          disabled={compareDisabled}
+          title={compareDisabled ? "Max 3 to compare" : selected ? "Remove from compare" : "Add to compare"}
+          className={
+            "border rounded-md px-2.5 py-2 shrink-0 text-[11px] font-medium transition-colors " +
+            (selected
+              ? "bg-primary text-white border-primary"
+              : "btn-ghost border-border " + (compareDisabled ? "opacity-40 cursor-not-allowed" : ""))
+          }
+        >
+          <GitCompareArrows size={15} />
+        </button>
+      </div>
     </div>
   );
 }

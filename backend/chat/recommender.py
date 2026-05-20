@@ -435,3 +435,165 @@ def browse_top(
         _course_to_card(c, c.one_line_pitch or f"{c.programme_type or 'Course'} from {c.provider or 'upGrad'}.")
         for c in picks[:n]
     ]
+
+
+# ---------- recommend_all (all_cards intent) ------------------------------------
+
+_ALL_CARDS_CAP = 20
+
+_BATCH_WHY_PROMPT = """\
+For each course below, write a "why_this_fits_short" sentence for this user profile.
+Max 12 words each. Warm but plain — no brochure phrases, no adjective stacking.
+Reference a concrete user value (years, goal, format, budget) if available.
+
+User profile: {profile_json}
+
+Courses:
+{courses_json}
+
+Output STRICT JSON only:
+{{"results": [{{"slug": "...", "why": "..."}}]}}
+"""
+
+
+def recommend_all(
+    session: Session,
+    slot_values: dict[str, Any],
+    client: OpenAI | None = None,
+    filter_override: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return all hard-filter matches (cap {cap}), sorted by embedding similarity.
+
+    Skips LLM rerank — uses a single batch call for why_this_fits_short.
+    """.format(cap=_ALL_CARDS_CAP)
+    client = client or OpenAI()
+    candidates = hard_filter(session, slot_values, filter_override=filter_override)
+    ranked = top_n_by_similarity(candidates, slot_values, n=_ALL_CARDS_CAP, client=client)
+    ranked = ranked[:_ALL_CARDS_CAP]
+
+    if not ranked:
+        return []
+
+    # Batch LLM call for short why strings
+    model = os.getenv("OPENAI_MODEL_RERANK", "gpt-4o")
+    courses_list = [{"slug": c.slug, "title": c.title, "provider": c.provider,
+                     "level": c.level, "format": c.format, "fee_bucket": c.fee_bucket}
+                    for c in ranked]
+    why_map: dict[str, str] = {}
+    try:
+        payload = _BATCH_WHY_PROMPT.format(
+            profile_json=json.dumps(slot_values, ensure_ascii=False),
+            courses_json=json.dumps(courses_list, ensure_ascii=False),
+        )
+        resp = client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            temperature=0.3,
+            messages=[{"role": "user", "content": payload}],
+        )
+        raw = json.loads(resp.choices[0].message.content or "{}")
+        for item in raw.get("results", []):
+            slug = item.get("slug")
+            why = (item.get("why") or "").strip()
+            if slug and why:
+                why_map[slug] = why
+    except Exception:
+        pass
+
+    return [
+        _course_to_card(
+            c,
+            why_map.get(c.slug, c.one_line_pitch or f"{c.programme_type or 'Course'} from {c.provider or 'upGrad'}."),
+            slot_values=slot_values,
+        )
+        for c in ranked
+    ]
+
+
+# ---------- build_comparison (in-chat compare) ----------------------------------
+
+_COMPARE_SUMMARY_PROMPT = """\
+Write a 2-sentence max comparison summary for a user with this profile.
+Plain prose, warm but not brochure-y. Reference which course is better for which situation.
+No bullet points, no em dashes. Under 60 words.
+
+User profile: {profile_json}
+
+Courses being compared:
+{courses_json}
+"""
+
+
+def build_comparison(
+    slugs: list[str],
+    slot_values: dict[str, Any],
+    session: Session,
+    client: OpenAI | None = None,
+) -> dict[str, Any]:
+    """Build a structured comparison payload for in-chat display."""
+    import uuid
+
+    # Load courses first so we can early-exit without touching the OpenAI client
+    courses: list[Course] = []
+    for slug in slugs:
+        c = session.query(Course).filter(Course.slug == slug).one_or_none()
+        if c:
+            courses.append(c)
+
+    if not courses:
+        return {"comparison_id": str(uuid.uuid4()), "courses": [], "summary": ""}
+
+    client = client or OpenAI()
+
+
+    def _top_tools(c: Course) -> list[str]:
+        tools = [t.tag_value for t in c.tags if t.tag_type in ("tool", "tools")]
+        return tools[:3]
+
+    def _top_roles(c: Course) -> list[str]:
+        roles = [t.tag_value for t in c.tags if t.tag_type in ("target_role", "role")]
+        return roles[:3]
+
+    course_rows: list[dict[str, Any]] = []
+    for c in courses:
+        course_rows.append({
+            "slug": c.slug,
+            "title": c.title,
+            "provider": c.provider,
+            "logo_url": None,  # not stored in DB
+            "duration_label": c.duration_label,
+            "format": c.format,
+            "level": c.level,
+            "fee_bucket": c.fee_bucket,
+            "emi_starts_from_inr": c.emi_starts_from_inr,
+            "min_years_exp": c.min_years_exp,
+            "min_degree": c.min_degree,
+            "top_tools": _top_tools(c),
+            "target_roles_top": _top_roles(c),
+        })
+
+    # Generate summary
+    model = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
+    summary = ""
+    try:
+        compact = [{"slug": r["slug"], "title": r["title"], "provider": r["provider"],
+                    "level": r["level"], "format": r["format"], "fee_bucket": r["fee_bucket"]}
+                   for r in course_rows]
+        payload = _COMPARE_SUMMARY_PROMPT.format(
+            profile_json=json.dumps(slot_values, ensure_ascii=False),
+            courses_json=json.dumps(compact, ensure_ascii=False),
+        )
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=0.5,
+            messages=[{"role": "user", "content": payload}],
+        )
+        summary = (resp.choices[0].message.content or "").strip()
+    except Exception:
+        summary = ""
+
+    return {
+        "comparison_id": str(uuid.uuid4()),
+        "courses": course_rows,
+        "summary": summary,
+    }

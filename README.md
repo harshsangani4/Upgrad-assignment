@@ -51,3 +51,14 @@ Alternative: cron-job.org with the same URL on a 10-minute interval.
 - Long-conversation handling: running summary + sliding window + off-topic steer-back.
 - "Show me more" pagination and chat-driven filter refinement ("any IIM options?", "cheaper please").
 - Richer cards: `fit_reasons` and an honest `watch_outs` per recommendation.
+
+### What's new in v0.3
+
+- **Voice round 2:** Replaced phrase-based blocklist with 4 structural regex patterns (A–D) that are harder to paraphrase around. Server-side lint-and-retry on every assistant turn (stream-optimistic — user sees tokens immediately; retry fires silently if needed).
+- **Smarter planner threshold:** Bot now waits for 5 of 7 hard slots before auto-recommending. "Show me" with only 3–4 slots triggers a `CONFIRM_RECOMMEND` flow with "Keep going / Show me now" chips. 12-turn fallback so users are never trapped.
+- **Attach a course to chat:** Drag a card (desktop) or click "Ask about this" (all devices) → course chip appears in composer → questions go to `/api/course/{slug}/ask`, which answers from the real DB data only (no hallucinated fees/modules).
+- **In-chat comparison:** Select 2–3 cards → Compare bar appears → click Compare → a full table appears *inside the chat thread*, not a modal. Follow-up questions like "which one for a career switch?" work because the comparison stays in context.
+- **Right-rail auto-scroll:** When new cards arrive, the rail smoothly scrolls to the first one with a 1.5s red glow. Respects manual scroll (skips if user scrolled in the last second).
+- **"All courses" intent:** "show me all" now returns all hard-filter matches (up to 20) in a single batch call, with concrete count in the bot reply ("Here are all 14 that match your filters"). "Show me more" still pages 3 at a time. "Show me 10 more" sets the page size.
+- **Layout polish:** Chat column centered `max-w-2xl`, `px-6 py-8`; right rail fixed at 420px; message rhythm `space-y-4`; Progress bar done-state shows ✓ green checkmark.
+

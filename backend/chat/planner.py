@@ -21,6 +21,14 @@ from .slots import HARD_SLOTS, SLOT_BY_NAME, SLOT_PHRASINGS, SLOTS
 READY = "READY_TO_RECOMMEND"
 BROWSE_ALL = "BROWSE_ALL"
 STEER_BACK = "STEER_BACK"
+CONFIRM_RECOMMEND = "CONFIRM_RECOMMEND"
+
+# How many hard slots must be filled before auto-recommending.
+MIN_HARD_SLOTS_FOR_AUTO_RECOMMEND = 5   # of 7 hard slots
+# Minimum slots required for a forced recommend (user explicitly says "show me").
+MIN_HARD_SLOTS_FOR_FORCED_RECOMMEND = 3
+# After this many turns, lower the threshold so we don't trap people.
+MAX_TURNS_BEFORE_LOWERING_THRESHOLD = 12
 
 # Heuristic: user said something that means "stop interviewing me, recommend".
 SHOW_ME_RE = re.compile(
@@ -61,6 +69,10 @@ class SessionState:
     pagination_offset: int = 0
     last_filter_override: dict[str, Any] | None = None
     recommended_slugs: list[str] = field(default_factory=list)
+    # Phase 9.3 turn counter for fallback threshold
+    turn_count: int = 0
+    # Phase 9.3 last_comparison for in-chat compare context
+    last_comparison: dict[str, Any] | None = None
 
     def merge_extracted(self, updates: dict[str, Any]) -> list[str]:
         """Merge new slot values; return the list of slots that newly transitioned to filled."""
@@ -103,15 +115,35 @@ def _candidate_slots(state: SessionState, hard_only: bool) -> list[str]:
     return out
 
 
+def _hard_slots_filled_count(state: SessionState) -> int:
+    return sum(1 for s in HARD_SLOTS if _is_filled(state, s))
+
+
 def plan_next(state: SessionState, latest_user_msg: str = "") -> tuple[str, str | None]:
-    """Return (next_slot_name | READY | BROWSE_ALL, suggested_phrasing or None)."""
+    """Return (next_slot_name | READY | BROWSE_ALL | CONFIRM_RECOMMEND, suggested_phrasing or None)."""
     msg = latest_user_msg or ""
     if BROWSE_RE.search(msg):
         return BROWSE_ALL, None
-    if SHOW_ME_RE.search(msg):
+
+    hard_filled = _hard_slots_filled_count(state)
+    show_me = bool(SHOW_ME_RE.search(msg))
+
+    # Turn-count fallback: if the conversation has been going a long time, lower the bar.
+    if state.turn_count > MAX_TURNS_BEFORE_LOWERING_THRESHOLD and hard_filled >= 4:
         return READY, None
+
     if _all_hard_filled(state):
         return READY, None
+
+    if hard_filled >= MIN_HARD_SLOTS_FOR_AUTO_RECOMMEND:
+        return READY, None
+
+    if show_me:
+        if hard_filled >= MIN_HARD_SLOTS_FOR_FORCED_RECOMMEND:
+            # Have some data but not enough for ideal picks — ask to confirm.
+            return CONFIRM_RECOMMEND, None
+        # Too little data even for a forced recommend — keep gathering.
+        pass  # fall through to normal ASK logic
 
     candidates = _candidate_slots(state, hard_only=True) or _candidate_slots(state, hard_only=False)
     if not candidates:

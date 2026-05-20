@@ -82,3 +82,14 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* Phase 9.6 — new-card glow when the rail auto-scrolls */
+@keyframes card-glow {
+  0%   { box-shadow: 0 0 0 3px rgba(224, 43, 32, 0.20); }
+  100% { box-shadow: 0 0 0 0px rgba(224, 43, 32, 0.00); }
+}
+
+[data-new="true"] {
+  animation: card-glow 1.5s ease-out forwards;
+}
+

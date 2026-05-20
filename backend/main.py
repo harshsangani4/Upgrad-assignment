@@ -1,11 +1,13 @@
 """FastAPI app for the upGrad course concierge.
 
 Endpoints:
-- POST /api/chat        SSE stream: extractor → planner → recommender (when ready)
-- POST /api/recommend   force-recommend regardless of slot state
-- GET  /api/courses/{slug}  full course detail (joined tags + modules)
-- GET  /api/session/{id}    debug dump of slot state
-- GET  /healthz             health probe
+- POST /api/chat               SSE stream: extractor → planner → recommender (when ready)
+- POST /api/recommend          force-recommend regardless of slot state
+- POST /api/course/{slug}/ask  SSE stream: course-specific Q&A (Task 9.4)
+- POST /api/compare            structured course comparison (Task 9.5)
+- GET  /api/courses/{slug}     full course detail (joined tags + modules)
+- GET  /api/session/{id}       debug dump of slot state
+- GET  /healthz                health probe
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import json
 import os
 from typing import AsyncIterator, Iterator
 
+import pydantic
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +25,7 @@ from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from backend.chat.extractor import classify_intent, extract_slots
+from backend.chat.linter import lint as voice_lint
 from backend.chat.persona import (
     HOOK_MESSAGE,
     PERSONA_FULL,
@@ -30,15 +34,17 @@ from backend.chat.persona import (
 )
 from backend.chat.planner import (
     BROWSE_ALL,
+    CONFIRM_RECOMMEND,
     READY,
     STEER_BACK,
     plan_next,
     record_question,
     should_steer_back,
 )
-from backend.chat.recommender import browse_top, recommend
+from backend.chat.recommender import browse_top, build_comparison, recommend, recommend_all
 from backend.chat.slots import SLOT_PHRASINGS, SLOT_QUICK_REPLIES
 from backend.chat.summarizer import maybe_summarize
+from backend.chat.course_qa import get_course_by_slug, stream_course_answer
 from backend.models import Course, CourseModule, CourseTag, get_engine, get_session_factory
 from backend.schemas import (
     ChatRequest,
@@ -52,6 +58,7 @@ from backend.store import db_session, get_or_create_session, get_session
 
 # Local directive markers (post-recommendation intents that bypass the slot flow).
 MORE_CARDS = "MORE_CARDS"
+ALL_CARDS = "ALL_CARDS"
 FILTER_CHANGE = "FILTER_CHANGE"
 COMPARE = "COMPARE"
 DONE = "DONE"
@@ -130,10 +137,24 @@ def _directive_text(hint: str | None, phrasing: str | None, state) -> str:
             "The user has drifted off topic. Acknowledge their digression in under 8 words, then "
             f"gently circle back to what we still need. Suggested phrasing: \"{ph}\"."
         )
+    if hint == CONFIRM_RECOMMEND:
+        return base + (
+            "The planner says CONFIRM_RECOMMEND: user asked to see courses but we have fewer than "
+            "5 hard slots filled. Say you're happy to recommend now, but sharper picks come with "
+            "a couple more details. Keep it under 20 words. Offer two options: keep going or see now. "
+            "Example: \"Happy to, I'll have sharper picks with a couple more details — but I can take "
+            "a swing now. Which?\""
+        )
     if hint == MORE_CARDS:
         return base + (
             "The user wants more options. Reply with one short line handing off to the new cards, "
             "under 15 words. Example: \"Sure, a few more worth a look.\" Do not list features."
+        )
+    if hint == ALL_CARDS:
+        return base + (
+            "The user asked for ALL courses that match. Reply with the concrete count in one sentence "
+            "under 20 words. Example: \"Here are all 14 that match your filters — the right rail's got them.\""
+            " If fewer than 5 match, note that and suggest loosening one filter."
         )
     if hint == FILTER_CHANGE:
         return base + (
@@ -259,25 +280,42 @@ def _progress(state) -> dict:
 
 def _plan_turn(state, message: str, client: OpenAI) -> dict:
     """Decide what this turn does. Returns a dict of directives + any recommendations."""
+    # Increment turn counter for threshold fallback
+    state.turn_count += 1
+
     # Post-recommendation intents only matter once cards exist.
-    intent_info = {"intent": "answering", "filter_override": None}
+    intent_info = {"intent": "answering", "filter_override": None, "requested_count": None}
     if state.recommended_context:
         intent_info = classify_intent(message, state.messages, client=client)
     intent = intent_info["intent"]
+    requested_count = intent_info.get("requested_count") or PAGE_SIZE
 
     factory = get_session_factory(get_engine())
 
     if intent == "more_cards" and state.recommended_context:
+        page_size = requested_count
         with factory() as db:
             recs = recommend(
                 db, state.slot_values, state.messages, client=client,
-                offset=state.pagination_offset, limit=PAGE_SIZE,
+                offset=state.pagination_offset, limit=page_size,
                 filter_override=state.last_filter_override,
                 exclude_slugs=set(state.recommended_slugs),
             )
         state.pagination_offset += len(recs)
         _store_recommended_context(state, recs, append=True)
-        return {"hint": MORE_CARDS, "phrasing": None, "recommendations": recs, "quick_slot": None}
+        return {"hint": MORE_CARDS, "phrasing": None, "recommendations": recs, "quick_slot": None,
+                "all_count": None}
+
+    if intent == "all_cards" and state.recommended_context:
+        with factory() as db:
+            recs = recommend_all(
+                db, state.slot_values, client=client,
+                filter_override=state.last_filter_override,
+            )
+        _store_recommended_context(state, recs, append=False)
+        state.pagination_offset = len(recs)
+        return {"hint": ALL_CARDS, "phrasing": None, "recommendations": recs, "quick_slot": None,
+                "all_count": len(recs)}
 
     if intent == "filter_change" and state.recommended_context:
         override = intent_info.get("filter_override") or {}
@@ -291,13 +329,16 @@ def _plan_turn(state, message: str, client: OpenAI) -> dict:
             )
         state.pagination_offset = len(recs)
         _store_recommended_context(state, recs, append=False)
-        return {"hint": FILTER_CHANGE, "phrasing": None, "recommendations": recs, "quick_slot": None}
+        return {"hint": FILTER_CHANGE, "phrasing": None, "recommendations": recs, "quick_slot": None,
+                "all_count": None}
 
     if intent == "compare" and state.recommended_context:
-        return {"hint": COMPARE, "phrasing": None, "recommendations": [], "quick_slot": None}
+        return {"hint": COMPARE, "phrasing": None, "recommendations": [], "quick_slot": None,
+                "all_count": None}
 
     if intent == "done":
-        return {"hint": DONE, "phrasing": None, "recommendations": [], "quick_slot": None}
+        return {"hint": DONE, "phrasing": None, "recommendations": [], "quick_slot": None,
+                "all_count": None}
 
     # Normal flow: extract slots, track off-topic streak, plan next slot.
     updates = extract_slots(state.messages, message, client=client)
@@ -311,14 +352,16 @@ def _plan_turn(state, message: str, client: OpenAI) -> dict:
     hint, phrasing = plan_next(state, latest_user_msg=message)
 
     if hint not in (READY, BROWSE_ALL) and should_steer_back(state):
-        return {"hint": STEER_BACK, "phrasing": phrasing, "recommendations": [], "quick_slot": None}
+        return {"hint": STEER_BACK, "phrasing": phrasing, "recommendations": [], "quick_slot": None,
+                "all_count": None}
 
     already_recommended = bool(state.recommended_context)
 
     # If we've already shown cards and nothing new came in, this is a follow-up
     # question, not a re-recommend. Answer it conversationally from the context.
     if hint == READY and already_recommended and not newly_filled:
-        return {"hint": None, "phrasing": None, "recommendations": [], "quick_slot": None}
+        return {"hint": None, "phrasing": None, "recommendations": [], "quick_slot": None,
+                "all_count": None}
 
     recs: list[dict] = []
     if hint == READY:
@@ -331,8 +374,9 @@ def _plan_turn(state, message: str, client: OpenAI) -> dict:
             recs = browse_top(db, state.slot_values, n=8)
         _store_recommended_context(state, recs, append=False)
 
-    quick_slot = hint if hint not in (READY, BROWSE_ALL) else None
-    return {"hint": hint, "phrasing": phrasing, "recommendations": recs, "quick_slot": quick_slot}
+    quick_slot = hint if hint not in (READY, BROWSE_ALL, CONFIRM_RECOMMEND) else None
+    return {"hint": hint, "phrasing": phrasing, "recommendations": recs, "quick_slot": quick_slot,
+            "all_count": None}
 
 
 @app.post("/api/chat")
@@ -345,14 +389,46 @@ def chat(req: ChatRequest):
     client = _openai()
     turn = _plan_turn(state, req.message, client)
     hint = turn["hint"]
+    all_count = turn.get("all_count")
 
     # Long-conversation: summarize older turns, keep recent window.
     state.history_summary, recent_window = maybe_summarize(
         state.messages, state.history_summary, client=client
     )
 
+    # Inject last_comparison context if available
+    if state.last_comparison:
+        slugs = [c["title"] for c in state.last_comparison.get("courses", [])]
+        if slugs:
+            recent_window = [
+                {
+                    "role": "system",
+                    "content": (
+                        "The user recently compared these courses: "
+                        + ", ".join(slugs)
+                        + ". They may ask follow-ups; reference the courses by short title."
+                    ),
+                }
+            ] + recent_window
+
     directive = _directive_text(hint, turn["phrasing"], state)
+    # For ALL_CARDS, inject the actual count into the directive
+    if hint == ALL_CARDS and all_count is not None:
+        directive = directive.replace(
+            "Here are all 14 that match",
+            f"Here are all {all_count} that match"
+        )
+        if all_count < 5:
+            directive += (
+                f" Only {all_count} strictly match — mention this and suggest loosening "
+                "budget or experience as quick-reply chips."
+            )
     messages_for_llm = _build_chat_messages(state, directive, recent_window, is_first_turn)
+
+    # CONFIRM_RECOMMEND chips
+    confirm_chips: list[str] = []
+    if hint == CONFIRM_RECOMMEND:
+        confirm_chips = ["Keep going", "Show me now"]
 
     def event_stream() -> Iterator[bytes]:
         yield _sse("session", {"session_id": state.session_id}).encode("utf-8")
@@ -363,6 +439,10 @@ def chat(req: ChatRequest):
             if chips:
                 yield _sse("quick_replies", {"slot": turn["quick_slot"], "options": chips}).encode("utf-8")
 
+        if confirm_chips:
+            yield _sse("quick_replies", {"slot": "confirm_recommend", "options": confirm_chips}).encode("utf-8")
+
+        # --- Stream-optimistic lint: stream live, lint after, retry if dirty ---
         assistant_buf: list[str] = []
         try:
             for token in _stream_assistant(messages_for_llm, client):
@@ -373,13 +453,42 @@ def chat(req: ChatRequest):
             return
 
         full_text = "".join(assistant_buf).strip()
+
+        # Lint the streamed response
+        hits = voice_lint(full_text) if full_text else []
+        if hits:
+            import logging
+            logging.getLogger(__name__).warning("Voice lint hit on first pass: %s", hits)
+            # Regenerate once non-streaming with explicit rewrite instruction
+            rewrite_directive = (
+                f"Your previous draft contained banned patterns: {', '.join(hits)}. "
+                "Rewrite the response now without those patterns. "
+                + directive
+            )
+            rewrite_msgs = _build_chat_messages(state, rewrite_directive, recent_window, is_first_turn)
+            retry_buf: list[str] = []
+            try:
+                for token in _stream_assistant(rewrite_msgs, client):
+                    retry_buf.append(token)
+                    yield _sse("token", {"value": token}).encode("utf-8")
+                retry_text = "".join(retry_buf).strip()
+                hits2 = voice_lint(retry_text) if retry_text else []
+                if hits2:
+                    logging.getLogger(__name__).warning(
+                        "Voice lint still hitting after retry: %s", hits2
+                    )
+                if retry_text:
+                    full_text = retry_text
+            except Exception:
+                pass  # ship what we have
+
         if full_text:
             state.messages.append({"role": "assistant", "content": full_text})
         if turn["quick_slot"]:
             record_question(state, turn["quick_slot"])
 
         if turn["recommendations"]:
-            mode = "append" if hint == MORE_CARDS else "replace"
+            mode = "append" if hint in (MORE_CARDS, ALL_CARDS) else "replace"
             yield _sse("recommendations", {"items": turn["recommendations"], "mode": mode}).encode("utf-8")
         yield _sse("done", {"ok": True}).encode("utf-8")
 
@@ -465,3 +574,57 @@ def session_dump(session_id: str):
         attempts=dict(state.attempts),
         message_count=len(state.messages),
     )
+
+
+# ---------- Course Q&A endpoint (Task 9.4) ------------------------------------
+
+class CourseAskRequest(pydantic.BaseModel):
+    session_id: str | None = None
+    message: str
+
+
+@app.post("/api/course/{slug}/ask")
+def course_ask(slug: str, req: CourseAskRequest, db: Session = Depends(db_session)):
+    """Stream an answer to a follow-up question about a specific course."""
+    course = get_course_by_slug(slug, db)
+    if course is None:
+        raise HTTPException(status_code=404, detail="course not found")
+
+    client = _openai()
+
+    def event_stream() -> Iterator[bytes]:
+        buf: list[str] = []
+        try:
+            for token in stream_course_answer(course, req.message, PERSONA_TURN_REMINDER, client=client):
+                buf.append(token)
+                yield _sse("token", {"value": token}).encode("utf-8")
+        except Exception as e:
+            yield _sse("error", {"message": str(e)}).encode("utf-8")
+            return
+        yield _sse("done", {"ok": True}).encode("utf-8")
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ---------- Compare endpoint (Task 9.5) ---------------------------------------
+
+class CompareRequest(pydantic.BaseModel):
+    session_id: str
+    slugs: list[str]
+
+
+@app.post("/api/compare")
+def compare_courses(req: CompareRequest, db: Session = Depends(db_session)):
+    """Return a structured comparison of 2-3 courses and store it in the session."""
+    if len(req.slugs) < 2 or len(req.slugs) > 3:
+        raise HTTPException(status_code=400, detail="compare requires 2 to 3 slugs")
+
+    state = get_session(req.session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    client = _openai()
+    result = build_comparison(req.slugs, state.slot_values, db, client=client)
+    state.last_comparison = result
+    return result
+

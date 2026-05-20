@@ -7,13 +7,18 @@ import Composer from "./components/Composer";
 import PicksRail from "./components/PicksRail";
 import {
   streamChat,
+  streamCourseAsk,
   fetchMore,
+  fetchComparison,
   type ChatMessage,
   type Recommendation,
   type Progress as ProgressType,
+  type ComparisonResult,
+  type AttachedCourse,
 } from "./lib/api";
 
 const SESSION_KEY = "upgrad-concierge-session-id";
+const COURSE_MSG_AUTO_CLEAR = 3;
 
 const HOOK_MESSAGE =
   "Hey, I'm here to help you figure out which upGrad course is actually right for you, not just the shiny one. Think of me as the friend who's done the homework. So, what's pulling you here? A specific goal, or just browsing?";
@@ -35,6 +40,14 @@ export default function App() {
   const [exhausted, setExhausted] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Task 9.4 — attached course
+  const [attachedCourse, setAttachedCourse] = useState<AttachedCourse | null>(null);
+  const [courseMessageCount, setCourseMessageCount] = useState(0);
+
+  // Task 9.5 — compare selection
+  const [selectedSlugs, setSelectedSlugs] = useState<string[]>([]);
+  const [comparingLoading, setComparingLoading] = useState(false);
+
   useEffect(() => {
     if (sessionId) localStorage.setItem(SESSION_KEY, sessionId);
     else localStorage.removeItem(SESSION_KEY);
@@ -51,15 +64,16 @@ export default function App() {
     setExhausted(false);
     setStreaming(false);
     setAwaitingFirstToken(false);
+    setAttachedCourse(null);
+    setCourseMessageCount(0);
+    setSelectedSlugs([]);
   };
 
-  const send = async (text: string) => {
-    setMessages((m) => {
-      const cleared = m.map((msg, i) =>
-        i === m.length - 1 && msg.role === "assistant" ? { ...msg, quickReplies: undefined } : msg
-      );
-      return [...cleared, { role: "user", content: text }];
-    });
+  // ---- Core streaming helper ------------------------------------------------
+
+  const _runStream = async (
+    streamFn: (onEvent: Parameters<typeof streamChat>[2], signal: AbortSignal) => Promise<void>
+  ) => {
     setStreaming(true);
     setAwaitingFirstToken(true);
 
@@ -69,45 +83,41 @@ export default function App() {
     abortRef.current = ctrl;
 
     try {
-      await streamChat(
-        sessionId,
-        text,
-        (evt) => {
-          if (evt.type === "session") {
-            setSessionId(evt.sessionId);
-          } else if (evt.type === "progress") {
-            setProgress(evt.progress);
-          } else if (evt.type === "quick_replies") {
-            pendingQuickReplies = evt.payload;
-          } else if (evt.type === "token") {
-            setAwaitingFirstToken(false);
-            setMessages((m) => {
-              if (!assistantStarted) {
-                assistantStarted = true;
-                return [...m, { role: "assistant", content: evt.value, quickReplies: pendingQuickReplies }];
-              }
-              const last = m[m.length - 1];
-              if (last?.role !== "assistant") {
-                return [...m, { role: "assistant", content: evt.value, quickReplies: pendingQuickReplies }];
-              }
-              return [...m.slice(0, -1), { ...last, content: last.content + evt.value }];
-            });
-          } else if (evt.type === "recommendations") {
-            setExhausted(false);
-            if (evt.mode === "append") {
-              setRecommendations((prev) => {
-                const seen = new Set(prev.map((r) => r.course_slug));
-                return [...prev, ...evt.items.filter((r) => !seen.has(r.course_slug))];
-              });
-            } else {
-              setRecommendations(evt.items);
+      await streamFn((evt) => {
+        if (evt.type === "session") {
+          setSessionId(evt.sessionId);
+        } else if (evt.type === "progress") {
+          setProgress(evt.progress);
+        } else if (evt.type === "quick_replies") {
+          pendingQuickReplies = evt.payload;
+        } else if (evt.type === "token") {
+          setAwaitingFirstToken(false);
+          setMessages((m) => {
+            if (!assistantStarted) {
+              assistantStarted = true;
+              return [...m, { role: "assistant", content: evt.value, quickReplies: pendingQuickReplies }];
             }
-          } else if (evt.type === "error") {
-            setMessages((m) => [...m, { role: "assistant", content: `(error: ${evt.message})` }]);
+            const last = m[m.length - 1];
+            if (last?.role !== "assistant") {
+              return [...m, { role: "assistant", content: evt.value, quickReplies: pendingQuickReplies }];
+            }
+            return [...m.slice(0, -1), { ...last, content: last.content + evt.value }];
+          });
+        } else if (evt.type === "recommendations") {
+          const now = Date.now();
+          setExhausted(false);
+          if (evt.mode === "append") {
+            setRecommendations((prev) => {
+              const seen = new Set(prev.map((r) => r.course_slug));
+              return [...prev, ...evt.items.filter((r) => !seen.has(r.course_slug)).map((r) => ({ ...r, addedAt: now }))];
+            });
+          } else {
+            setRecommendations(evt.items.map((r) => ({ ...r, addedAt: now })));
           }
-        },
-        ctrl.signal
-      );
+        } else if (evt.type === "error") {
+          setMessages((m) => [...m, { role: "assistant", content: `(error: ${evt.message})` }]);
+        }
+      }, ctrl.signal);
     } catch (err: any) {
       if (err?.name !== "AbortError") {
         setMessages((m) => [
@@ -122,6 +132,36 @@ export default function App() {
     }
   };
 
+  // ---- Send: normal chat or course Q&A ------------------------------------
+
+  const send = async (text: string, attached?: AttachedCourse) => {
+    // Clear quick replies on last assistant message
+    setMessages((m) =>
+      m.map((msg, i) =>
+        i === m.length - 1 && msg.role === "assistant" ? { ...msg, quickReplies: undefined } : msg
+      ).concat([{ role: "user", content: text }])
+    );
+
+    if (attached) {
+      // Course Q&A path
+      const newCount = courseMessageCount + 1;
+      setCourseMessageCount(newCount);
+      if (newCount >= COURSE_MSG_AUTO_CLEAR) {
+        setAttachedCourse(null);
+        setCourseMessageCount(0);
+      }
+
+      await _runStream((onEvent, signal) =>
+        streamCourseAsk(attached.slug, sessionId, text, onEvent, signal)
+      );
+    } else {
+      // Normal chat path
+      await _runStream((onEvent, signal) =>
+        streamChat(sessionId, text, onEvent, signal)
+      );
+    }
+  };
+
   const handleSeeMore = async () => {
     if (!sessionId || loadingMore) return;
     setLoadingMore(true);
@@ -130,9 +170,10 @@ export default function App() {
       if (more.length === 0) {
         setExhausted(true);
       } else {
+        const now = Date.now();
         setRecommendations((prev) => {
           const seen = new Set(prev.map((r) => r.course_slug));
-          const fresh = more.filter((r) => !seen.has(r.course_slug));
+          const fresh = more.filter((r) => !seen.has(r.course_slug)).map((r) => ({ ...r, addedAt: now }));
           if (fresh.length < 3) setExhausted(true);
           return [...prev, ...fresh];
         });
@@ -144,17 +185,65 @@ export default function App() {
     }
   };
 
+  // ---- Task 9.4 — ask about course ----------------------------------------
+
+  const handleAskAbout = (course: AttachedCourse) => {
+    setAttachedCourse(course);
+    setCourseMessageCount(0);
+  };
+
+  const handleDismissCourse = () => {
+    setAttachedCourse(null);
+    setCourseMessageCount(0);
+  };
+
+  const handleDropCourse = (course: AttachedCourse) => {
+    setAttachedCourse(course);
+    setCourseMessageCount(0);
+  };
+
+  // ---- Task 9.5 — compare -------------------------------------------------
+
+  const handleToggleCompare = (slug: string) => {
+    setSelectedSlugs((prev) => {
+      if (prev.includes(slug)) return prev.filter((s) => s !== slug);
+      if (prev.length >= 3) return prev; // max 3
+      return [...prev, slug];
+    });
+  };
+
+  const handleCompare = async () => {
+    if (!sessionId || selectedSlugs.length < 2 || comparingLoading) return;
+    setComparingLoading(true);
+    try {
+      const result: ComparisonResult = await fetchComparison(sessionId, selectedSlugs);
+      // Inject comparison as a special assistant message
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: "", comparison: result },
+      ]);
+      setSelectedSlugs([]);
+    } catch (err) {
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: "(comparison failed — please try again)" },
+      ]);
+    } finally {
+      setComparingLoading(false);
+    }
+  };
+
   return (
     <div className="h-[100dvh] flex flex-col overflow-hidden">
       <TopBar onNewChat={handleNewChat} />
       <Progress filled={progress.filled} total={progress.total} />
 
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden w-full max-w-[1280px] mx-auto">
+      <div className="flex-1 flex flex-col lg:grid lg:grid-cols-[1fr_420px] lg:gap-8 overflow-hidden w-full max-w-[1280px] mx-auto">
         <section className="flex flex-col flex-1 min-w-0 lg:border-r border-border overflow-hidden">
           {showHero ? (
-            <div className="flex-1 overflow-y-auto px-4 py-2">
+            <div className="flex-1 overflow-y-auto px-6 py-8">
               <div className="max-w-2xl mx-auto">
-                <HeroEmpty hookMessage={HOOK_MESSAGE} starters={STARTERS} onStarter={send} />
+                <HeroEmpty hookMessage={HOOK_MESSAGE} starters={STARTERS} onStarter={(t) => send(t)} />
               </div>
             </div>
           ) : (
@@ -162,15 +251,22 @@ export default function App() {
               messages={messages}
               streaming={streaming}
               awaitingFirstToken={awaitingFirstToken}
-              onQuickReply={send}
+              onQuickReply={(t) => send(t)}
             />
           )}
-          <Composer onSend={send} disabled={streaming} />
+          <Composer
+            onSend={send}
+            disabled={streaming}
+            attachedCourse={attachedCourse}
+            courseMessageCount={courseMessageCount}
+            onDismissCourse={handleDismissCourse}
+            onDropCourse={handleDropCourse}
+          />
         </section>
 
         <section
           className={
-            "lg:w-[380px] shrink-0 overflow-hidden bg-white/40 " +
+            "lg:shrink-0 overflow-hidden bg-white/40 " +
             (recommendations.length === 0
               ? "hidden lg:flex lg:flex-col"
               : "flex flex-col max-lg:max-h-[45vh] max-lg:border-t border-border")
@@ -181,6 +277,11 @@ export default function App() {
             onSeeMore={handleSeeMore}
             loadingMore={loadingMore}
             exhausted={exhausted}
+            selectedSlugs={selectedSlugs}
+            onToggleCompare={handleToggleCompare}
+            onCompare={handleCompare}
+            comparingLoading={comparingLoading}
+            onAskAbout={handleAskAbout}
           />
         </section>
       </div>
