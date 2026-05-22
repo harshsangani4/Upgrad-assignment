@@ -62,7 +62,22 @@ ALL_CARDS = "ALL_CARDS"
 FILTER_CHANGE = "FILTER_CHANGE"
 COMPARE = "COMPARE"
 DONE = "DONE"
+COURSE_QA = "COURSE_QA"
 PAGE_SIZE = 3
+
+# The user wants to leave a course thread and see other/new courses.
+import re as _re
+EXIT_FOCUS_RE = _re.compile(
+    r"\b(show me (?:more|other|another)|other (?:courses?|options?|programs?|programmes?)|"
+    r"different (?:courses?|options?)|something else|see (?:all|more|other)|more options|"
+    r"new search|start over|any other|what else|go back)\b",
+    _re.IGNORECASE,
+)
+_COURSE_MATCH_STOPWORDS = {
+    "the", "and", "for", "with", "from", "program", "programme", "course", "courses",
+    "certificate", "certification", "executive", "online", "upgrad", "post", "graduate",
+    "advanced", "professional", "management", "data", "science",
+}
 
 load_dotenv()
 
@@ -92,6 +107,19 @@ app.add_middleware(
 
 def _openai() -> OpenAI:
     return OpenAI()
+
+
+def _friendly_error(exc: Exception) -> str:
+    """User-facing message for a failed turn. The raw exception is logged, never shown."""
+    import logging
+
+    logging.getLogger(__name__).warning("turn error: %r", exc)
+    msg = str(exc).lower()
+    if "rate limit" in msg or "rate_limit" in msg or "429" in msg or "quota" in msg:
+        return "I'm getting a lot of requests right now. Give me a few seconds and try that again."
+    if "timeout" in msg or "timed out" in msg:
+        return "That took longer than expected on my end. Mind trying again?"
+    return "Something hiccuped on my end. Could you try that again in a moment?"
 
 
 def _sse(event: str, data: dict | str) -> str:
@@ -259,10 +287,31 @@ def _generate_assistant(messages: list[dict], client: OpenAI) -> str:
     return _strip_dashes(content)
 
 
+_COURSE_QA_CORRECTION = (
+    " Do not mention data, sources, or that anything is unavailable. Speak as an upGrad "
+    "insider. If a detail is unknown, describe how upGrad programmes of this type usually "
+    "work, then point to the course page warmly. At least two sentences."
+)
+
+
+def _answer_course(course, question: str, client: OpenAI) -> str:
+    """Generate a course-QA answer, then lint+regen once if it leaks jargon or punts."""
+    def gen(extra: str = "") -> str:
+        return _strip_dashes(
+            "".join(stream_course_answer(course, question, PERSONA_TURN_REMINDER + extra, client=client))
+        )
+
+    answer = gen()
+    if voice_lint(answer):
+        answer = gen(_COURSE_QA_CORRECTION)
+    return answer
+
+
 # ---------- endpoints ------------------------------------------------------------
 
-@app.get("/healthz")
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 def healthz() -> dict:
+    # GET and HEAD both supported — uptime monitors often probe with HEAD.
     return {"ok": True}
 
 
@@ -299,6 +348,30 @@ def _progress(state) -> dict:
 
     filled = sum(1 for s in HARD_SLOTS if state.slot_values.get(s) not in (None, "", []))
     return {"filled": filled, "total": len(HARD_SLOTS)}
+
+
+def _match_recommended_course(state, message: str) -> str | None:
+    """Return the slug of a recommended course the message clearly names, else None.
+
+    Scored by overlap of distinctive provider/title tokens. A provider hit is strong
+    (e.g. 'IIIT Bangalore' -> 'iiit', 'bangalore'); title words add 1 each. Threshold 2.
+    """
+    msg = (message or "").lower()
+    msg_tokens = set(_re.findall(r"[a-z]{3,}", msg))
+    best_slug, best_score = None, 0
+    for c in state.recommended_context:
+        score = 0
+        provider = (c.get("provider") or "").lower()
+        for tok in _re.findall(r"[a-z]{3,}", provider):
+            if tok not in _COURSE_MATCH_STOPWORDS and tok in msg_tokens:
+                score += 2
+        title = (c.get("title") or "").lower()
+        for tok in _re.findall(r"[a-z]{4,}", title):
+            if tok not in _COURSE_MATCH_STOPWORDS and tok in msg_tokens:
+                score += 1
+        if score > best_score:
+            best_score, best_slug = score, c.get("slug")
+    return best_slug if best_score >= 2 else None
 
 
 def _plan_turn(state, message: str, client: OpenAI) -> dict:
@@ -363,6 +436,16 @@ def _plan_turn(state, message: str, client: OpenAI) -> dict:
         return {"hint": DONE, "phrasing": None, "recommendations": [], "quick_slot": None,
                 "all_count": None}
 
+    # Course focus: if the user names one of the recommended courses, answer about it
+    # specifically (full course data + heuristics) and signal the frontend to keep the
+    # thread on that course for follow-ups.
+    if state.recommended_context and not EXIT_FOCUS_RE.search(message or ""):
+        focus_slug = _match_recommended_course(state, message)
+        if focus_slug:
+            state.focused_course_slug = focus_slug
+            return {"hint": COURSE_QA, "focus_slug": focus_slug, "phrasing": None,
+                    "recommendations": [], "quick_slot": None, "all_count": None}
+
     # Normal flow: extract slots, track off-topic streak, plan next slot.
     updates = extract_slots(state.messages, message, client=client)
     newly_filled = state.merge_extracted(updates)
@@ -413,6 +496,35 @@ def chat(req: ChatRequest):
     turn = _plan_turn(state, req.message, client)
     hint = turn["hint"]
     all_count = turn.get("all_count")
+
+    # Course-focus: answer about the named course and tell the client to keep the
+    # thread on it. Follow-ups then route to /api/course/{slug}/ask via the chip.
+    if hint == COURSE_QA:
+        focus_slug = turn["focus_slug"]
+
+        def course_stream() -> Iterator[bytes]:
+            yield _sse("session", {"session_id": state.session_id}).encode("utf-8")
+            yield _sse("progress", _progress(state)).encode("utf-8")
+            factory = get_session_factory(get_engine())
+            with factory() as db:
+                course = get_course_by_slug(focus_slug, db)
+                if course is None:
+                    yield _sse("error", {"message": "course not found"}).encode("utf-8")
+                    return
+                yield _sse("focused_course", {
+                    "slug": course.slug, "title": course.title, "provider": course.provider,
+                }).encode("utf-8")
+                try:
+                    answer = _answer_course(course, req.message, client)
+                except Exception as e:
+                    yield _sse("error", {"message": _friendly_error(e)}).encode("utf-8")
+                    return
+            for i in range(0, len(answer), 4):
+                yield _sse("token", {"value": answer[i:i + 4]}).encode("utf-8")
+            state.messages.append({"role": "assistant", "content": answer})
+            yield _sse("done", {"ok": True}).encode("utf-8")
+
+        return StreamingResponse(course_stream(), media_type="text/event-stream")
 
     # Long-conversation: summarize older turns, keep recent window.
     state.history_summary, recent_window = maybe_summarize(
@@ -469,7 +581,7 @@ def chat(req: ChatRequest):
         try:
             full_text = _generate_assistant(messages_for_llm, client)
         except Exception as e:
-            yield _sse("error", {"message": str(e)}).encode("utf-8")
+            yield _sse("error", {"message": _friendly_error(e)}).encode("utf-8")
             return
 
         hits = voice_lint(full_text) if full_text else []
@@ -612,28 +724,12 @@ def course_ask(slug: str, req: CourseAskRequest, db: Session = Depends(db_sessio
 
     client = _openai()
 
-    # Guard: never let internal-mechanics leaks ("scraped data") or curt redirects
-    # reach the user. Course-QA answers are short, so we buffer, lint, and regen once.
-    correction = (
-        " Do not mention data, sources, or that anything is unavailable. Speak as an "
-        "upGrad insider. If a detail is unknown, describe how upGrad programmes of this "
-        "type usually work, then point to the official page warmly. At least two sentences."
-    )
-
-    def _generate(extra: str = "") -> str:
-        return "".join(
-            stream_course_answer(course, req.message, PERSONA_TURN_REMINDER + extra, client=client)
-        )
-
     def event_stream() -> Iterator[bytes]:
         try:
-            answer = _generate()
-            if voice_lint(answer):
-                answer = _generate(correction)
+            answer = _answer_course(course, req.message, client)
         except Exception as e:
-            yield _sse("error", {"message": str(e)}).encode("utf-8")
+            yield _sse("error", {"message": _friendly_error(e)}).encode("utf-8")
             return
-        # Emit the vetted answer (single token event; frontend appends it as-is).
         yield _sse("token", {"value": answer}).encode("utf-8")
         yield _sse("done", {"ok": True}).encode("utf-8")
 

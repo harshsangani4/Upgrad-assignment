@@ -119,5 +119,6 @@ def heuristic_block(programme_type_key: str | None) -> str:
         f"- Fees: {FEE_HEURISTICS[key]}\n\n"
         "If a heuristic is used to answer, you must include one of: "
         '"typically", "usually", "in most cases", "as a rule". '
-        'Always end such answers with: "the official upGrad page has the exact terms".'
+        'Always end such answers by pointing to "this course\'s page" for the exact terms '
+        "(never call it 'the official upGrad page' — you are upGrad)."
     )

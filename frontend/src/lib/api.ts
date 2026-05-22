@@ -61,6 +61,7 @@ export type ChatMessage = {
   content: string;
   quickReplies?: QuickReplyPayload;
   comparison?: ComparisonResult;
+  attachedCourse?: AttachedCourse;
 };
 
 export type StreamEvent =
@@ -69,6 +70,7 @@ export type StreamEvent =
   | { type: "token"; value: string }
   | { type: "recommendations"; items: Recommendation[]; mode: "replace" | "append" }
   | { type: "quick_replies"; payload: QuickReplyPayload }
+  | { type: "focused_course"; course: AttachedCourse }
   | { type: "error"; message: string }
   | { type: "done" };
 
@@ -110,6 +112,11 @@ function parseEventBlock(block: string): StreamEvent | null {
       return {
         type: "quick_replies",
         payload: { slot: payload.slot, options: payload.options ?? [] },
+      };
+    case "focused_course":
+      return {
+        type: "focused_course",
+        course: { slug: payload.slug, title: payload.title, provider: payload.provider ?? null },
       };
     case "error":
       return { type: "error", message: payload.message ?? "unknown error" };

@@ -96,6 +96,11 @@ export default function App() {
           setProgress(evt.progress);
         } else if (evt.type === "quick_replies") {
           pendingQuickReplies = evt.payload;
+        } else if (evt.type === "focused_course") {
+          // Backend recognized a course by name; keep the thread on it so follow-ups
+          // route to course Q&A and the chip shows above the composer.
+          setAttachedCourse(evt.course);
+          setCourseMessageCount(0);
         } else if (evt.type === "token") {
           setAwaitingFirstToken(false);
           setMessages((m) => {
@@ -121,14 +126,17 @@ export default function App() {
             setRecommendations(evt.items.map((r) => ({ ...r, addedAt: now })));
           }
         } else if (evt.type === "error") {
-          setMessages((m) => [...m, { role: "assistant", content: `(error: ${evt.message})` }]);
+          const friendly = evt.message && !/error code|rate.?limit|\b429\b|traceback|exception/i.test(evt.message)
+            ? evt.message
+            : "I'm getting a lot of requests right now. Give me a few seconds and try that again.";
+          setMessages((m) => [...m, { role: "assistant", content: friendly }]);
         }
       }, ctrl.signal);
     } catch (err: any) {
       if (err?.name !== "AbortError") {
         setMessages((m) => [
           ...m,
-          { role: "assistant", content: "(connection error, is the backend running?)" },
+          { role: "assistant", content: "I couldn't reach the server just now. Please try again in a moment." },
         ]);
       }
     } finally {
@@ -141,11 +149,12 @@ export default function App() {
   // ---- Send: normal chat or course Q&A ------------------------------------
 
   const send = async (text: string, attached?: AttachedCourse) => {
-    // Clear quick replies on last assistant message
+    // Clear quick replies on last assistant message; attach the course to the user
+    // message so it shows as a reference (caption + chip) in the bubble.
     setMessages((m) =>
       m.map((msg, i) =>
         i === m.length - 1 && msg.role === "assistant" ? { ...msg, quickReplies: undefined } : msg
-      ).concat([{ role: "user", content: text }])
+      ).concat([{ role: "user", content: text, attachedCourse: attached ?? undefined }])
     );
 
     if (attached) {

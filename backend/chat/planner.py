@@ -78,7 +78,11 @@ class SessionState:
     pagination_offset: int = 0
     
     last_comparison: dict | None = None
-    
+
+    # Course the user is currently discussing in the main chat (typed, not dragged).
+    # Follow-up questions stay on this course until they ask for other courses.
+    focused_course_slug: str | None = None
+
     used_templates: dict[str, list[int]] = field(default_factory=lambda: {
         "ack_then_ask": [],
         "recommend_transition": [],

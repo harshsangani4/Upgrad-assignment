@@ -56,7 +56,7 @@ export default function ChatWindow({ messages, streaming, awaitingFirstToken, on
                 {m.comparison ? (
                   <ComparisonMessage data={m.comparison} />
                 ) : (
-                  <MessageBubble role={m.role} content={m.content} />
+                  <MessageBubble role={m.role} content={m.content} attachedCourse={m.attachedCourse} />
                 )}
                 {isLast && m.role === "assistant" && m.quickReplies && !streaming && (
                   <div className="mt-2">

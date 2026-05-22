@@ -41,6 +41,9 @@ BANNED_REGEXES = [
 
     # PATTERN R (12.x) — bare redirect as the ENTIRE response (rude one-liner).
     (r"^[\s]*the upGrad page (?:covers|has|details|will have|would have|should have|includes|provides)\b.{0,90}\.?\s*$", "PATTERN_R"),
+
+    # PATTERN S (12.x) — third-party framing of upGrad (this bot IS upGrad).
+    (r"(official upGrad page|upGrad'?s (?:official )?(?:page|website|site)|check (?:out )?upGrad|on upGrad'?s (?:page|website|site))", "PATTERN_S"),
 ]
 
 _DOTALL_IDS = {"APOLOGY_WITH_ANSWER", "PATTERN_P", "PATTERN_R"}
