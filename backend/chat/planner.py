@@ -83,12 +83,28 @@ class SessionState:
     # Follow-up questions stay on this course until they ask for other courses.
     focused_course_slug: str | None = None
 
+    # Phase 13 — lead capture state (PII never lives here; only flags + counters).
+    turns_since_first_recommendation: int = -1  # -1 = recommendation not yet shown
+    turns_since_last_lead_offer: int = 999
+    user_declined_lead: bool = False
+    course_qa_depth: dict[str, int] = field(default_factory=dict)
+    lead_captured: bool = False
+    lead_id: str | None = None
+    lead_first_name: str | None = None  # held in memory only; never sent to the LLM
+    engagement_score: int = 0  # substantive turns since recommendation (phrase-independent)
+    _form_seq: int = 0
+
     used_templates: dict[str, list[int]] = field(default_factory=lambda: {
         "ack_then_ask": [],
         "recommend_transition": [],
         "course_overview": [],
         "confirm_recommend": [],
     })
+
+    def new_form_id(self) -> str:
+        """Idempotency key for a lead form rendered this session."""
+        self._form_seq += 1
+        return f"{self.session_id}-lead-{self._form_seq}"
 
     def merge_extracted(self, updates: dict[str, Any]) -> list[str]:
         """Merge new slot values; return the list of slots that newly transitioned to filled."""

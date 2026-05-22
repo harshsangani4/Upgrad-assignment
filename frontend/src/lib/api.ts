@@ -56,12 +56,20 @@ export type ComparisonResult = {
   summary: string;
 };
 
+export type LeadFormPayload = {
+  formId: string;
+  courseSlug: string | null;
+  courseTitle: string | null;
+};
+
 export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   quickReplies?: QuickReplyPayload;
   comparison?: ComparisonResult;
   attachedCourse?: AttachedCourse;
+  leadForm?: LeadFormPayload; // render an inline lead-capture form
+  leadConfirm?: string; // server-templated confirmation card text
 };
 
 export type StreamEvent =
@@ -71,6 +79,7 @@ export type StreamEvent =
   | { type: "recommendations"; items: Recommendation[]; mode: "replace" | "append" }
   | { type: "quick_replies"; payload: QuickReplyPayload }
   | { type: "focused_course"; course: AttachedCourse }
+  | { type: "lead_form"; payload: LeadFormPayload }
   | { type: "error"; message: string }
   | { type: "done" };
 
@@ -117,6 +126,15 @@ function parseEventBlock(block: string): StreamEvent | null {
       return {
         type: "focused_course",
         course: { slug: payload.slug, title: payload.title, provider: payload.provider ?? null },
+      };
+    case "lead_form":
+      return {
+        type: "lead_form",
+        payload: {
+          formId: payload.form_id,
+          courseSlug: payload.course_slug ?? null,
+          courseTitle: payload.course_title ?? null,
+        },
       };
     case "error":
       return { type: "error", message: payload.message ?? "unknown error" };
@@ -190,6 +208,41 @@ export async function streamCourseAsk(
     onEvent,
     signal
   );
+}
+
+export type LeadSubmitPayload = {
+  session_id: string;
+  form_id: string;
+  name: string;
+  email: string;
+  phone: string;
+  course_slug: string | null;
+  consent: boolean;
+};
+
+// PII firewall: this is the ONLY place contact details are sent, and it goes
+// straight to /api/leads — never through /api/chat.
+export async function submitLead(payload: LeadSubmitPayload): Promise<{ message?: string }> {
+  const res = await fetch(`${API_BASE}/api/leads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.detail?.[0]?.msg || data?.detail || "Couldn't submit. Try once more?");
+  }
+  return res.json();
+}
+
+export async function dismissLead(sessionId: string, formId: string): Promise<{ message?: string }> {
+  const res = await fetch(`${API_BASE}/api/leads/dismiss`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, form_id: formId }),
+  });
+  if (!res.ok) return {};
+  return res.json();
 }
 
 export async function fetchMore(

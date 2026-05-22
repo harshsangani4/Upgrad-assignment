@@ -101,6 +101,9 @@ export default function App() {
           // route to course Q&A and the chip shows above the composer.
           setAttachedCourse(evt.course);
           setCourseMessageCount(0);
+        } else if (evt.type === "lead_form") {
+          // Render the inline lead-capture form as its own message below the opener.
+          setMessages((m) => [...m, { role: "assistant", content: "", leadForm: evt.payload }]);
         } else if (evt.type === "token") {
           setAwaitingFirstToken(false);
           setMessages((m) => {
@@ -229,6 +232,21 @@ export default function App() {
 
   const handleClearCompare = () => setSelectedSlugs([]);
 
+  // ---- Phase 13 — lead capture --------------------------------------------
+
+  const handleLeadSubmitted = (index: number, confirmText: string) => {
+    setMessages((m) =>
+      m.map((msg, i) => (i === index ? { role: "assistant", content: "", leadConfirm: confirmText } : msg))
+    );
+    setAttachedCourse(null);
+  };
+
+  const handleLeadDismissed = (index: number, reply: string) => {
+    setMessages((m) =>
+      m.map((msg, i) => (i === index ? { role: "assistant", content: reply } : msg))
+    );
+  };
+
   const handleCompare = async () => {
     if (!sessionId || selectedSlugs.length < 2 || comparingLoading) return;
     setComparingLoading(true);
@@ -267,6 +285,9 @@ export default function App() {
             <ChatWindow
               messages={messages}
               streaming={streaming}
+              sessionId={sessionId}
+              onLeadSubmitted={handleLeadSubmitted}
+              onLeadDismissed={handleLeadDismissed}
               awaitingFirstToken={awaitingFirstToken}
               onQuickReply={(t) => send(t)}
             />

@@ -44,6 +44,12 @@ BANNED_REGEXES = [
 
     # PATTERN S (12.x) — third-party framing of upGrad (this bot IS upGrad).
     (r"(official upGrad page|upGrad'?s (?:official )?(?:page|website|site)|check (?:out )?upGrad|on upGrad'?s (?:page|website|site))", "PATTERN_S"),
+
+    # PATTERN T (13.2) — blunt / robotic lead-capture asks (the form does this, not prose).
+    (r"\bwhich (course|one|program(?:me)?) (?:are you|interests you)\b", "PATTERN_T"),
+    (r"\bcan i (?:get|have) your (?:contact|email|phone|number|details)\b", "PATTERN_T"),
+    (r"\bfill out (?:this|the) form\b", "PATTERN_T"),
+    (r"\bplease (?:provide|enter|share) your\b", "PATTERN_T"),
 ]
 
 _DOTALL_IDS = {"APOLOGY_WITH_ANSWER", "PATTERN_P", "PATTERN_R"}

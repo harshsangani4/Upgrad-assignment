@@ -45,6 +45,10 @@ from backend.chat.recommender import browse_top, build_comparison, recommend, re
 from backend.chat.slots import SLOT_PHRASINGS, SLOT_QUICK_REPLIES
 from backend.chat.summarizer import maybe_summarize
 from backend.chat.course_qa import get_course_by_slug, stream_course_answer
+from backend.chat.lead_trigger import decide as lead_decide
+from backend.chat.lead_templates import pick_opener
+from backend.chat.redaction import scrub_history_for_llm
+from backend.routes.leads import router as leads_router
 from backend.models import Course, CourseModule, CourseTag, get_engine, get_session_factory
 from backend.schemas import (
     ChatRequest,
@@ -63,6 +67,7 @@ FILTER_CHANGE = "FILTER_CHANGE"
 COMPARE = "COMPARE"
 DONE = "DONE"
 COURSE_QA = "COURSE_QA"
+LEAD_FORM = "LEAD_FORM"
 PAGE_SIZE = 3
 
 # The user wants to leave a course thread and see other/new courses.
@@ -78,6 +83,13 @@ _COURSE_MATCH_STOPWORDS = {
     "certificate", "certification", "executive", "online", "upgrad", "post", "graduate",
     "advanced", "professional", "management", "data", "science",
 }
+# (title phrase, message regex) — lets "AI"/"ML"/"DS" abbreviations match full titles.
+_COURSE_ALIASES = [
+    ("artificial intelligence", r"\bai\b"),
+    ("machine learning", r"\bml\b"),
+    ("data science", r"\b(ds|data sci)\b"),
+    ("generative", r"\bgen[- ]?ai\b"),
+]
 
 load_dotenv()
 
@@ -101,6 +113,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Lead capture (PII firewall) — a separate route that never touches OpenAI.
+app.include_router(leads_router)
 
 
 # ---------- helpers --------------------------------------------------------------
@@ -258,7 +273,16 @@ def _build_chat_messages(state, directive: str, recent_window: list[dict], is_fi
                 + json.dumps(state.recommended_context, ensure_ascii=False, indent=2)
             ),
         })
-    msgs.extend(recent_window)
+    if state.lead_captured:
+        msgs.append({
+            "role": "system",
+            "content": (
+                "The user has already shared their contact details with the team. Do not ask for "
+                "them again or offer to connect them. Just keep helping with their questions."
+            ),
+        })
+    # PII firewall: mask any stray email/phone and collapse redacted turns to a marker.
+    msgs.extend(scrub_history_for_llm(recent_window))
     if directive:
         msgs.append({"role": "system", "content": directive})
     return msgs
@@ -294,11 +318,17 @@ _COURSE_QA_CORRECTION = (
 )
 
 
-def _answer_course(course, question: str, client: OpenAI) -> str:
-    """Generate a course-QA answer, then lint+regen once if it leaks jargon or punts."""
+def _answer_course(course, question: str, client: OpenAI, lead_handoff: bool = False) -> str:
+    """Generate a course-QA answer, then lint+regen once if it leaks jargon or punts.
+
+    With lead_handoff=True the answer ends by segueing naturally into a chat-with-the-team
+    offer (the lead form renders right after), so the opener is contextual, not canned.
+    """
     def gen(extra: str = "") -> str:
         return _strip_dashes(
-            "".join(stream_course_answer(course, question, PERSONA_TURN_REMINDER + extra, client=client))
+            "".join(stream_course_answer(
+                course, question, PERSONA_TURN_REMINDER + extra, client=client, lead_handoff=lead_handoff
+            ))
         )
 
     answer = gen()
@@ -341,6 +371,9 @@ def _store_recommended_context(state, recommendations: list[dict], *, append: bo
     else:
         state.recommended_context = ctx
         state.recommended_slugs = list(slugs)
+    # Start the lead-capture clock the first time we show recommendations.
+    if recommendations and state.turns_since_first_recommendation < 0:
+        state.turns_since_first_recommendation = 0
 
 
 def _progress(state) -> dict:
@@ -369,6 +402,10 @@ def _match_recommended_course(state, message: str) -> str | None:
         for tok in _re.findall(r"[a-z]{4,}", title):
             if tok not in _COURSE_MATCH_STOPWORDS and tok in msg_tokens:
                 score += 1
+        # Abbreviations: users say "AI / ML" for "Artificial Intelligence / Machine Learning".
+        for phrase, pat in _COURSE_ALIASES:
+            if phrase in title and _re.search(pat, msg):
+                score += 2
         if score > best_score:
             best_score, best_slug = score, c.get("slug")
     return best_slug if best_score >= 2 else None
@@ -378,6 +415,14 @@ def _plan_turn(state, message: str, client: OpenAI) -> dict:
     """Decide what this turn does. Returns a dict of directives + any recommendations."""
     # Increment turn counter for threshold fallback
     state.turn_count += 1
+    # Lead-capture clocks: advance once recommendations have been shown.
+    if state.turns_since_first_recommendation >= 0:
+        state.turns_since_first_recommendation += 1
+    state.turns_since_last_lead_offer += 1
+    # Every turn after recommendations is the user continuing to engage. Counting
+    # this (not specific phrases) is what lets the funnel surface the form on intent.
+    if state.recommended_context:
+        state.engagement_score += 1
 
     # Post-recommendation intents only matter once cards exist.
     intent_info = {"intent": "answering", "filter_override": None, "requested_count": None}
@@ -436,6 +481,15 @@ def _plan_turn(state, message: str, client: OpenAI) -> dict:
         return {"hint": DONE, "phrasing": None, "recommendations": [], "quick_slot": None,
                 "all_count": None}
 
+    # Lead capture (server-side trigger, deterministic). Takes precedence once the
+    # user is past recommendations and showing buying intent. The form, not the LLM,
+    # collects contact details.
+    lead = lead_decide(state, message)
+    if lead.should_surface:
+        state.turns_since_last_lead_offer = 0
+        return {"hint": LEAD_FORM, "lead_course_slug": lead.course_slug, "phrasing": None,
+                "recommendations": [], "quick_slot": None, "all_count": None}
+
     # Course focus: if the user names one of the recommended courses, answer about it
     # specifically (full course data + heuristics) and signal the frontend to keep the
     # thread on that course for follow-ups.
@@ -443,6 +497,7 @@ def _plan_turn(state, message: str, client: OpenAI) -> dict:
         focus_slug = _match_recommended_course(state, message)
         if focus_slug:
             state.focused_course_slug = focus_slug
+            state.course_qa_depth[focus_slug] = state.course_qa_depth.get(focus_slug, 0) + 1
             return {"hint": COURSE_QA, "focus_slug": focus_slug, "phrasing": None,
                     "recommendations": [], "quick_slot": None, "all_count": None}
 
@@ -525,6 +580,40 @@ def chat(req: ChatRequest):
             yield _sse("done", {"ok": True}).encode("utf-8")
 
         return StreamingResponse(course_stream(), media_type="text/event-stream")
+
+    # Lead capture: answer the user's question and segue into the offer, then the form widget.
+    if hint == LEAD_FORM:
+        course_slug = turn.get("lead_course_slug")
+        form_id = state.new_form_id()
+        short_title = None
+        course_obj = None
+        if course_slug:
+            factory = get_session_factory(get_engine())
+            with factory() as db:
+                course_obj = get_course_by_slug(course_slug, db)
+                short_title = course_obj.title if course_obj else None
+
+        if course_obj is not None:
+            # Contextual: answer their question, then transition to the offer.
+            try:
+                opener = _answer_course(course_obj, req.message, client, lead_handoff=True)
+            except Exception:
+                opener = pick_opener(short_title)
+        else:
+            opener = pick_opener(None)
+
+        def lead_stream() -> Iterator[bytes]:
+            yield _sse("session", {"session_id": state.session_id}).encode("utf-8")
+            yield _sse("progress", _progress(state)).encode("utf-8")
+            for i in range(0, len(opener), 4):
+                yield _sse("token", {"value": opener[i:i + 4]}).encode("utf-8")
+            state.messages.append({"role": "assistant", "content": opener})
+            yield _sse("lead_form", {
+                "form_id": form_id, "course_slug": course_slug, "course_title": short_title,
+            }).encode("utf-8")
+            yield _sse("done", {"ok": True}).encode("utf-8")
+
+        return StreamingResponse(lead_stream(), media_type="text/event-stream")
 
     # Long-conversation: summarize older turns, keep recent window.
     state.history_summary, recent_window = maybe_summarize(
@@ -717,12 +806,50 @@ class CourseAskRequest(pydantic.BaseModel):
 
 @app.post("/api/course/{slug}/ask")
 def course_ask(slug: str, req: CourseAskRequest, db: Session = Depends(db_session)):
-    """Stream an answer to a follow-up question about a specific course."""
+    """Answer a follow-up about a specific course, OR surface the lead form.
+
+    This is where most engagement happens (the user has dragged a course in), so the
+    lead trigger MUST run here too, not just in /api/chat. Otherwise high-intent
+    messages like "how can I enrol" never convert.
+    """
     course = get_course_by_slug(slug, db)
     if course is None:
         raise HTTPException(status_code=404, detail="course not found")
 
     client = _openai()
+    state = get_or_create_session(req.session_id)
+    state.messages.append({"role": "user", "content": req.message})
+
+    # Engagement accounting (mirrors /api/chat's clocks). Attaching a course means
+    # the user has seen recommendations, so start the clock if it hasn't.
+    if state.turns_since_first_recommendation < 1:
+        state.turns_since_first_recommendation = 1
+    state.turns_since_last_lead_offer += 1
+    state.engagement_score += 1
+    state.focused_course_slug = slug
+    state.course_qa_depth[slug] = state.course_qa_depth.get(slug, 0) + 1
+
+    decision = lead_decide(state, req.message)
+
+    if decision.should_surface:
+        state.turns_since_last_lead_offer = 0
+        form_id = state.new_form_id()
+
+        def lead_stream() -> Iterator[bytes]:
+            # Answer their actual question, then segue into the offer (not a canned line).
+            try:
+                opener = _answer_course(course, req.message, client, lead_handoff=True)
+            except Exception:
+                opener = pick_opener(course.title)
+            for i in range(0, len(opener), 4):
+                yield _sse("token", {"value": opener[i:i + 4]}).encode("utf-8")
+            state.messages.append({"role": "assistant", "content": opener})
+            yield _sse("lead_form", {
+                "form_id": form_id, "course_slug": slug, "course_title": course.title,
+            }).encode("utf-8")
+            yield _sse("done", {"ok": True}).encode("utf-8")
+
+        return StreamingResponse(lead_stream(), media_type="text/event-stream")
 
     def event_stream() -> Iterator[bytes]:
         try:
@@ -730,6 +857,7 @@ def course_ask(slug: str, req: CourseAskRequest, db: Session = Depends(db_sessio
         except Exception as e:
             yield _sse("error", {"message": _friendly_error(e)}).encode("utf-8")
             return
+        state.messages.append({"role": "assistant", "content": answer})
         yield _sse("token", {"value": answer}).encode("utf-8")
         yield _sse("done", {"ok": True}).encode("utf-8")
 

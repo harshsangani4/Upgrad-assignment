@@ -4,6 +4,8 @@ import MessageBubble from "./MessageBubble";
 import TypingIndicator from "./TypingIndicator";
 import QuickReplies from "./QuickReplies";
 import ComparisonMessage from "./ComparisonMessage";
+import LeadFormMessage from "./LeadFormMessage";
+import LeadConfirmation from "./LeadConfirmation";
 import type { ChatMessage } from "../lib/api";
 
 type Props = {
@@ -11,11 +13,22 @@ type Props = {
   streaming: boolean;
   awaitingFirstToken: boolean;
   onQuickReply: (value: string) => void;
+  sessionId: string | null;
+  onLeadSubmitted: (index: number, confirmText: string) => void;
+  onLeadDismissed: (index: number, reply: string) => void;
 };
 
 const NEAR_BOTTOM_PX = 120;
 
-export default function ChatWindow({ messages, streaming, awaitingFirstToken, onQuickReply }: Props) {
+export default function ChatWindow({
+  messages,
+  streaming,
+  awaitingFirstToken,
+  onQuickReply,
+  sessionId,
+  onLeadSubmitted,
+  onLeadDismissed,
+}: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [nearBottom, setNearBottom] = useState(true);
 
@@ -53,7 +66,18 @@ export default function ChatWindow({ messages, streaming, awaitingFirstToken, on
 
             return (
               <div key={i} className={isReply ? "-mt-2" : ""}>
-                {m.comparison ? (
+                {m.leadConfirm ? (
+                  <LeadConfirmation text={m.leadConfirm} />
+                ) : m.leadForm ? (
+                  <LeadFormMessage
+                    formId={m.leadForm.formId}
+                    sessionId={sessionId ?? ""}
+                    courseSlug={m.leadForm.courseSlug}
+                    courseTitle={m.leadForm.courseTitle}
+                    onSubmitted={(text) => onLeadSubmitted(i, text)}
+                    onDismissed={(reply) => onLeadDismissed(i, reply)}
+                  />
+                ) : m.comparison ? (
                   <ComparisonMessage data={m.comparison} />
                 ) : (
                   <MessageBubble role={m.role} content={m.content} attachedCourse={m.attachedCourse} />

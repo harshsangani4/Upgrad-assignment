@@ -52,6 +52,11 @@ BAD: "I recommend checking the official upGrad page for any available discounts.
 BAD: "The faculty profile is not specified in the scraped data."
 BAD: "The upGrad page covers placement guarantees in detail."
 
+DO NOT OVER-REDIRECT:
+- If you have answered the question, STOP. Do not tack on "for more details, check the course page", "I recommend checking this course's page", or any similar line. It is repetitive and reads like a brush-off.
+- Only point to the course page when the SPECIFIC thing the user asked is genuinely unknown to you, and even then, give a useful approximate first.
+- Never end two consecutive answers with a "check the page" line.
+
 VOICE:
 - Warm and concrete, like a senior friend who knows the catalog. No brochure phrases, no em dashes, no scripted openers.
 - Reference a concrete word from the user's question.
@@ -184,16 +189,32 @@ def get_course_by_slug(slug: str, db: Session) -> Course | None:
     return db.query(Course).filter(Course.slug == slug).one_or_none()
 
 
-def build_course_qa_messages(course: Course, question: str, persona_reminder: str) -> list[dict[str, Any]]:
+LEAD_HANDOFF_INSTRUCTION = (
+    "This user is clearly interested. FIRST, answer their latest question fully and "
+    "concretely from the course details above. THEN, in your final one or two sentences, "
+    "transition naturally: the quickest way to lock in eligibility, fees and EMI, and the "
+    "application steps is a short chat with the upGrad team, and you can set that up. Make "
+    "the handoff feel like the obvious next step given exactly what they just asked, not a "
+    "sales pitch and not generic. Do NOT ask for their name, email, or phone in words, and "
+    "do NOT mention a form (a contact form appears right after your message)."
+)
+
+
+def build_course_qa_messages(
+    course: Course, question: str, persona_reminder: str, lead_handoff: bool = False
+) -> list[dict[str, Any]]:
     """Assemble the full message list for one course-QA turn."""
-    return [
+    msgs = [
         {"role": "system", "content": COURSE_QA_SYSTEM},
         {"role": "system", "content": f"You're an expert on THIS course. {persona_reminder}"},
         {"role": "system", "content": "LAYER 1 — SCRAPED COURSE DATA:\n" + build_course_context_message(course)},
         {"role": "system", "content": "LAYER 2 — " + heuristic_block(_ptk(course))},
         {"role": "system", "content": build_relevant_fields_block(course, question)},
-        {"role": "user", "content": question},
     ]
+    if lead_handoff:
+        msgs.append({"role": "system", "content": LEAD_HANDOFF_INSTRUCTION})
+    msgs.append({"role": "user", "content": question})
+    return msgs
 
 
 def stream_course_answer(
@@ -201,11 +222,12 @@ def stream_course_answer(
     question: str,
     persona_reminder: str,
     client: OpenAI | None = None,
+    lead_handoff: bool = False,
 ) -> Iterator[str]:
     """Yield streamed tokens answering `question` grounded in `course` data + heuristics."""
     client = client or OpenAI()
     model = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
-    messages = build_course_qa_messages(course, question, persona_reminder)
+    messages = build_course_qa_messages(course, question, persona_reminder, lead_handoff=lead_handoff)
 
     stream = client.chat.completions.create(
         model=model,
