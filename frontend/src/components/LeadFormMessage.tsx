@@ -56,7 +56,9 @@ export default function LeadFormMessage({
   };
 
   const handleDismiss = async () => {
-    const res = await dismissLead(sessionId, formId).catch(() => ({}));
+    const res = await dismissLead(sessionId, formId).catch(
+      () => ({} as { message?: string })
+    );
     onDismissed(res.message || "All good, no pressure. What else do you want to dig into?");
   };
 
